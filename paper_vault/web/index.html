@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper Vault</title>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/contrib/auto-render.min.js"></script>
+<style>
+:root {
+  --bg: #1e1e2e; --bg2: #282840; --bg3: #313150;
+  --fg: #cdd6f4; --fg2: #a6adc8; --fg3: #7f849c;
+  --accent: #89b4fa; --green: #a6e3a1; --red: #f38ba8;
+  --border: #45475a; --radius: 8px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background:var(--bg); color:var(--fg); height:100vh; display:flex;
+       overflow:hidden; }
+a { color:var(--accent); text-decoration:none; }
+
+/* Sidebar */
+#sidebar {
+  width:280px; min-width:280px; background:var(--bg2); border-right:1px solid var(--border);
+  display:flex; flex-direction:column; overflow-y:auto; padding:12px; gap:12px;
+}
+.section-title {
+  font-size:11px; font-weight:700; text-transform:uppercase;
+  color:var(--fg3); letter-spacing:0.5px; margin-bottom:4px;
+}
+#paper-list { list-style:none; max-height:300px; overflow-y:auto; }
+#paper-list li {
+  padding:6px 8px; border-radius:4px; cursor:pointer; font-size:13px;
+  color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+#paper-list li:hover { background:var(--bg3); }
+#paper-list li.active { background:var(--bg3); color:var(--accent); }
+#paper-list li .meta { font-size:10px; color:var(--fg3); }
+
+/* Upload */
+#drop-zone {
+  border:2px dashed var(--border); border-radius:var(--radius);
+  padding:16px; text-align:center; color:var(--fg3); font-size:13px;
+  cursor:pointer; transition:border-color .2s;
+}
+#drop-zone:hover, #drop-zone.dragover { border-color:var(--accent); color:var(--accent); }
+#drop-zone input { display:none; }
+#upload-status { font-size:11px; margin-top:4px; }
+
+/* Q&A */
+#qa-panel { display:flex; flex-direction:column; gap:6px; }
+#qa-input {
+  width:100%; resize:vertical; min-height:60px;
+  background:var(--bg3); color:var(--fg); border:1px solid var(--border);
+  border-radius:var(--radius); padding:8px; font-size:13px; font-family:inherit;
+}
+#qa-input:focus { outline:none; border-color:var(--accent); }
+.qa-row { display:flex; gap:6px; align-items:center; font-size:12px; color:var(--fg2); }
+.qa-row select, .qa-row input { background:var(--bg3); color:var(--fg);
+  border:1px solid var(--border); border-radius:4px; padding:2px 6px; font-size:12px; }
+.qa-row select { width:80px; }
+#qa-n { width:40px; }
+#qa-max-tokens { width:60px; }
+#qa-ask-btn {
+  width:100%; padding:8px; background:var(--accent); color:var(--bg);
+  border:none; border-radius:var(--radius); font-size:13px; font-weight:600;
+  cursor:pointer; margin-top:4px;
+}
+#qa-ask-btn:hover { opacity:0.9; }
+#qa-ask-btn:disabled { opacity:0.5; cursor:not-allowed; }
+
+/* Main */
+#main { flex:1; display:flex; flex-direction:column; overflow:hidden; }
+#toolbar {
+  padding:8px 16px; border-bottom:1px solid var(--border);
+  font-size:13px; color:var(--fg2); display:flex; justify-content:space-between;
+}
+#content {
+  flex:1; overflow-y:auto; padding:24px 32px;
+  /* #empty-state, #view-area, #settings-page are persistent children */
+}
+#empty-state { text-align:center; color:var(--fg3); margin-top:120px; }
+#empty-state h2 { font-size:18px; margin-bottom:8px; color:var(--fg2); }
+#view-area { display:none; }
+#settings-page { display:none; max-width:700px; padding:16px 0; }
+
+/* Markdown */
+.note-body { max-width:800px; line-height:1.65; font-size:14px; }
+.note-body h1 { font-size:22px; margin:16px 0 8px; color:var(--accent); }
+.note-body h2 { font-size:17px; margin:20px 0 8px; border-bottom:1px solid var(--border); padding-bottom:4px; }
+.note-body h3 { font-size:15px; margin:16px 0 6px; }
+.note-body p { margin:6px 0; }
+.note-body ul, .note-body ol { margin:4px 0; padding-left:20px; }
+.note-body li { margin:2px 0; }
+.note-body blockquote { border-left:3px solid var(--accent); padding-left:12px; color:var(--fg2); margin:8px 0; }
+.note-body code { background:var(--bg3); padding:1px 5px; border-radius:3px; font-size:13px; }
+.note-body pre { background:var(--bg3); padding:12px; border-radius:var(--radius); overflow-x:auto; }
+.note-body table { border-collapse:collapse; width:100%; margin:8px 0; }
+.note-body th, .note-body td { border:1px solid var(--border); padding:6px 10px; text-align:left; font-size:13px; }
+.note-body th { background:var(--bg3); }
+.katex { font-size:1.05em; color:var(--fg); }
+.katex-display { margin:8px 0; overflow-x:auto; }
+
+/* Answer */
+.answer-body { font-size:14px; line-height:1.65; }
+.answer-body h2 { font-size:16px; margin:16px 0 6px; border-bottom:1px solid var(--border); }
+.answer-body h3 { font-size:14px; margin:12px 0 4px; }
+.answer-body p { margin:4px 0; }
+.answer-body ul, .answer-body ol { padding-left:20px; }
+.answer-body table { border-collapse:collapse; width:100%; margin:8px 0; }
+.answer-body th, .answer-body td { border:1px solid var(--border); padding:4px 8px; font-size:13px; }
+.answer-body th { background:var(--bg3); }
+.answer-body code { background:var(--bg3); padding:1px 4px; border-radius:3px; }
+#cmd-help code { background:var(--bg3); padding:1px 3px; border-radius:2px; font-size:10px; color:var(--accent); }
+#cmd-help td { vertical-align:top; }
+.answer-body pre { background:var(--bg3); padding:10px; border-radius:var(--radius); overflow-x:auto; }
+
+.spinner {
+  display:inline-block; width:16px; height:16px; border:2px solid var(--border);
+  border-top:2px solid var(--accent); border-radius:50%; animation:spin .6s linear infinite;
+}
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* Settings */
+.settings-section { margin-bottom:18px; }
+.settings-section h3 { font-size:13px; color:var(--fg2); border-bottom:1px solid var(--border); padding-bottom:4px; margin-bottom:6px; }
+.settings-row { margin:6px 0; }
+.settings-row-top { display:flex; align-items:center; gap:8px; }
+.settings-row-top label { min-width:180px; color:var(--fg2); font-size:12px; }
+.settings-row-top input, .settings-row-top textarea {
+  flex:1; background:var(--bg3); color:var(--fg); border:1px solid var(--border);
+  border-radius:4px; padding:4px 8px; font-size:12px; font-family:monospace;
+}
+.settings-row-top input:focus, .settings-row-top textarea:focus { outline:none; border-color:var(--accent); }
+.settings-row-top textarea { resize:vertical; min-height:36px; }
+.settings-row-top button {
+  background:var(--bg3); color:var(--fg2); border:1px solid var(--border);
+  border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer;
+  white-space:nowrap;
+}
+.settings-row-top button:hover { border-color:var(--accent); color:var(--accent); }
+.settings-desc { display:block; font-size:10px; color:var(--fg3); margin-top:2px; margin-left:188px; line-height:1.4; }
+.prompt-row { margin:8px 0; }
+.prompt-row label { display:block; font-size:12px; color:var(--fg2); margin-bottom:3px; }
+.prompt-row textarea {
+  width:100%; min-height:120px; background:var(--bg3); color:var(--fg);
+  border:1px solid var(--border); border-radius:4px; padding:6px 8px;
+  font-size:11px; font-family:monospace; resize:vertical;
+}
+.prompt-row textarea:focus { outline:none; border-color:var(--accent); }
+.prompt-row .prompt-desc { font-size:10px; color:var(--fg3); margin-top:2px; }
+.prompt-row .prompt-reset {
+  font-size:10px; color:var(--accent); cursor:pointer; margin-left:8px;
+}
+.prompt-row .prompt-reset:hover { text-decoration:underline; }
+
+/* Browse modal — at body level, never destroyed */
+#browse-modal {
+  display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+  background:rgba(0,0,0,0.5); z-index:100; justify-content:center; align-items:center;
+}
+#browse-modal.show { display:flex; }
+.modal-box {
+  background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius);
+  width:500px; max-height:400px; display:flex; flex-direction:column; overflow:hidden;
+}
+.modal-header {
+  display:flex; justify-content:space-between; align-items:center;
+  padding:8px 12px; border-bottom:1px solid var(--border); font-size:13px;
+}
+.modal-header button { background:none; border:none; color:var(--fg3); cursor:pointer; font-size:16px; }
+.modal-path { padding:6px 12px; font-size:11px; color:var(--fg3); font-family:monospace; border-bottom:1px solid var(--border); }
+.modal-list { flex:1; overflow-y:auto; padding:4px; }
+.modal-list .browse-item {
+  padding:6px 12px; cursor:pointer; font-size:13px; border-radius:4px;
+  display:flex; align-items:center; gap:8px;
+}
+.modal-list .browse-item:hover { background:var(--bg3); }
+.modal-list .browse-item .icon { font-size:14px; }
+.modal-select-btn {
+  margin:8px 12px; padding:8px; background:var(--accent); color:var(--bg);
+  border:none; border-radius:var(--radius); font-size:13px; font-weight:600; cursor:pointer;
+}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div style="display:flex; justify-content:space-between; align-items:center">
+    <span style="font-weight:700; font-size:15px; color:var(--accent);">Paper Vault</span>
+    <span id="settings-btn" style="cursor:pointer; font-size:16px; opacity:0.6" title="Settings" onclick="showSettings()">⚙</span>
+  </div>
+
+  <div>
+    <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>📁 Notes</span>
+      <span onclick="loadPapers()" title="Refresh paper list" style="cursor:pointer;font-size:13px;opacity:0.5">↻</span>
+    </div>
+    <ul id="paper-list"><li style="color:var(--fg3)">Loading...</li></ul>
+    <div style="font-size:10px; color:var(--fg3); margin-top:2px" id="paper-count"></div>
+  </div>
+
+  <div>
+    <div class="section-title">📤 Import</div>
+    <div id="drop-zone">
+      <p>Drop PDF(s) or click to upload</p>
+      <input type="file" id="file-input" accept=".pdf" multiple webkitdirectory>
+    </div>
+    <div style="display:flex;gap:6px;margin-top:6px">
+      <button onclick="scanImport(false)" style="flex:1;padding:6px;background:var(--bg3);color:var(--fg2);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Scan import dirs</button>
+      <button onclick="scanImport(true)" style="flex:1;padding:6px;background:var(--bg3);color:var(--fg2);border:1px solid var(--border);border-radius:4px;font-size:11px;cursor:pointer">Force re-scan</button>
+    </div>
+    <button onclick="reindexOrphans()" style="width:100%;margin-top:4px;padding:5px;background:var(--bg3);color:var(--fg3);border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer" title="Re-add notes that exist on disk but are missing from the search index">Reindex orphan notes</button>
+    <button onclick="cleanDuplicates()" style="width:100%;margin-top:3px;padding:5px;background:var(--bg3);color:var(--fg3);border:1px solid var(--border);border-radius:4px;font-size:10px;cursor:pointer" title="Remove duplicate entries from the vector index">Clean duplicate entries</button>
+    <div id="upload-status"></div>
+  </div>
+
+  <div>
+    <div class="section-title">⌨️ Command</div>
+    <div style="display:flex;gap:4px">
+      <input id="cmd-input" placeholder="e.g. import --force, search GAN, list"
+             style="flex:1;background:var(--bg3);color:var(--fg);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;font-family:monospace"
+             onkeydown="if(event.key==='Enter')runCmd()">
+      <button onclick="runCmd()" style="padding:4px 10px;background:var(--accent);color:var(--bg);border:none;border-radius:4px;font-size:12px;cursor:pointer">Run</button>
+      <button onclick="toggleCmdHelp()" style="padding:4px 8px;background:var(--bg3);color:var(--fg3);border:1px solid var(--border);border-radius:4px;font-size:12px;cursor:pointer" title="Command reference">?</button>
+    </div>
+    <div id="cmd-help" style="display:none;margin-top:4px;font-size:11px;color:var(--fg2);max-height:200px;overflow-y:auto">
+      <table style="width:100%;border-collapse:collapse">
+        <tr style="color:var(--fg3)"><th style="text-align:left;padding:2px 4px;border-bottom:1px solid var(--border)">Command</th><th style="text-align:left;padding:2px 4px;border-bottom:1px solid var(--border)">Description</th></tr>
+        <tr><td style="padding:2px 4px"><code>import</code></td><td style="padding:2px 4px">Scan & import from configured dirs</td></tr>
+        <tr><td style="padding:2px 4px"><code>import --force</code></td><td style="padding:2px 4px">Force re-import all (ignore content hash)</td></tr>
+        <tr><td style="padding:2px 4px"><code>search &lt;query&gt;</code></td><td style="padding:2px 4px">Semantic search papers</td></tr>
+        <tr><td style="padding:2px 4px"><code>search &lt;query&gt; -k 10</code></td><td style="padding:2px 4px">Search with top-k results</td></tr>
+        <tr><td style="padding:2px 4px"><code>search &lt;query&gt; --year-from 2024</code></td><td style="padding:2px 4px">Filter by year range</td></tr>
+        <tr><td style="padding:2px 4px"><code>search &lt;query&gt; --author NAME</code></td><td style="padding:2px 4px">Filter by author</td></tr>
+        <tr><td style="padding:2px 4px"><code>ask &lt;question&gt;</code></td><td style="padding:2px 4px">RAG Q&A (auto detail level)</td></tr>
+        <tr><td style="padding:2px 4px"><code>ask &lt;question&gt; -n 10</code></td><td style="padding:2px 4px">Retrieve from up to 10 papers</td></tr>
+        <tr><td style="padding:2px 4px"><code>ask &lt;question&gt; -d 1|2|3|all</code></td><td style="padding:2px 4px">Detail: 1=notes only, 2=moderate, 3=extensive, all=full text</td></tr>
+        <tr><td style="padding:2px 4px"><code>ask &lt;question&gt; --max-tokens 4096</code></td><td style="padding:2px 4px">Override auto token budget</td></tr>
+        <tr><td style="padding:2px 4px"><code>list</code></td><td style="padding:2px 4px">List all indexed paper IDs</td></tr>
+        <tr><td style="padding:2px 4px"><code>fix-metadata &lt;id&gt;</code></td><td style="padding:2px 4px">Re-extract metadata for one paper</td></tr>
+        <tr><td style="padding:2px 4px"><code>fix-metadata --all</code></td><td style="padding:2px 4px">Re-extract metadata for all papers</td></tr>
+        <tr><td style="padding:2px 4px"><code>remove &lt;id&gt;</code></td><td style="padding:2px 4px">Remove paper from index</td></tr>
+      </table>
+    </div>
+    <div id="cmd-output" style="max-height:150px;overflow-y:auto;margin-top:4px;font-size:11px;font-family:monospace;color:var(--fg2)"></div>
+  </div>
+
+  <div id="qa-panel">
+    <div class="section-title">💬 RAG Q&A</div>
+    <textarea id="qa-input" placeholder="Ask about your papers..."></textarea>
+    <div class="qa-row">
+      Papers (-n) <input id="qa-n" type="number" value="5" min="1" max="30">
+      Detail (-d) <select id="qa-detail">
+        <option value="auto">auto</option><option value="1">1:notes</option>
+        <option value="2">2:moderate</option><option value="3">3:extensive</option>
+        <option value="all">all:text</option>
+      </select>
+    </div>
+    <div class="qa-row">
+      Max tokens <input id="qa-max-tokens" type="number" placeholder="auto" min="256" max="8192" step="256">
+    </div>
+    <button id="qa-ask-btn" onclick="doAsk()">Ask</button>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <div id="toolbar">
+    <span id="toolbar-title">Select a paper from the sidebar</span>
+    <span id="toolbar-usage"></span>
+  </div>
+  <div id="content">
+    <div id="empty-state">
+      <h2>Paper Vault</h2>
+      <p>Select a paper to read, or ask a question in the sidebar.</p>
+    </div>
+    <div id="view-area"></div>
+    <div id="settings-page">
+      <h2 style="margin-bottom:4px; color:var(--accent)">Settings</h2>
+      <p style="font-size:11px; color:var(--fg3); margin-bottom:16px">Hover over labels for details. Changes to paths/models require restart.</p>
+      <div id="settings-form"></div>
+      <button id="settings-save-btn" onclick="saveSettings()" style="margin-top:16px; padding:8px 20px; background:var(--accent); color:var(--bg); border:none; border-radius:var(--radius); font-size:13px; font-weight:600; cursor:pointer">Save</button>
+      <span id="settings-status" style="font-size:12px; margin-left:12px; color:var(--green)"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Browse modal — at body level so innerHTML on #content never destroys it -->
+<div id="browse-modal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <span>Select Folder</span>
+      <button onclick="closeBrowse()">&times;</button>
+    </div>
+    <div class="modal-path" id="browse-path"></div>
+    <div class="modal-list" id="browse-list"></div>
+    <button class="modal-select-btn" onclick="selectBrowseFolder()">Select This Folder</button>
+  </div>
+</div>
+
+<script>
+// ── State ──
+let papers = [];
+let activePid = null;
+let reqId = 0;        // monotonically incremented on each user action; stale responses bail out
+
+marked.setOptions({ breaks:true, gfm:true });
+
+// ── Markdown → HTML (sync, protects LaTeX from marked) ──
+function renderMd(text) {
+  const blocks = [];
+  text = text.replace(/\$\$([\s\S]*?)\$\$/g, (_, f) => { blocks.push({t:'d',f}); return `\x00LTX${blocks.length-1}\x00`; });
+  text = text.replace(/\$([^\$\n]+?)\$/g, (_, f) => { blocks.push({t:'i',f}); return `\x00LTX${blocks.length-1}\x00`; });
+  let html = marked.parse(text);
+  blocks.forEach((b, i) => {
+    html = html.replace(`\x00LTX${i}\x00`, b.t === 'd' ? `$$${b.f}$$` : `$${b.f}$`);
+  });
+  return html;
+}
+
+// ── Render KaTeX in an element (sync, called after innerHTML is set) ──
+function renderKatex(el) {
+  renderMathInElement(el, {
+    delimiters: [
+      {left:'$$', right:'$$', display:true},
+      {left:'$', right:'$', display:false},
+    ],
+    throwOnError: false,
+  });
+}
+
+// ── View management: show one of (empty, view-area, settings) ──
+function showView() {
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('settings-page').style.display = 'none';
+  document.getElementById('view-area').style.display = 'block';
+}
+function showEmpty() {
+  document.getElementById('settings-page').style.display = 'none';
+  document.getElementById('view-area').style.display = 'none';
+  document.getElementById('empty-state').style.display = '';
+}
+
+// ── Load paper list ──
+async function loadPapers() {
+  try {
+    const res = await fetch('/api/papers');
+    papers = await res.json();
+  } catch(e) {
+    papers = [];
+  }
+  const list = document.getElementById('paper-list');
+  list.innerHTML = papers.length ? '' : '<li style="color:var(--fg3)">No papers indexed</li>';
+  papers.forEach(p => {
+    const li = document.createElement('li');
+    const title = p.title || p.paper_id;
+    const meta = [p.year || '', p.authors?.split(',')[0] || ''].filter(Boolean).join(' · ');
+    li.innerHTML = `<span>${esc(title)}</span><div class="meta">${esc(meta)}</div>`;
+    li.onclick = () => selectPaper(p.paper_id);
+    if (p.paper_id === activePid) li.classList.add('active');
+    list.appendChild(li);
+  });
+  document.getElementById('paper-count').textContent = `${papers.length} paper(s)`;
+}
+
+// ── Select paper ──
+async function selectPaper(pid) {
+  const myReq = ++reqId;
+  activePid = pid;
+
+  // Sidebar highlight
+  document.querySelectorAll('#paper-list li').forEach(el => el.classList.remove('active'));
+  const items = document.querySelectorAll('#paper-list li');
+  const idx = papers.findIndex(p => p.paper_id === pid);
+  if (idx >= 0 && items[idx]) items[idx].classList.add('active');
+
+  const paper = papers.find(p => p.paper_id === pid);
+  if (!paper) { if (myReq === reqId) showEmpty(); return; }
+
+  document.getElementById('toolbar-title').textContent = paper.note_file || paper.title || pid;
+  document.getElementById('toolbar-usage').textContent = '';
+  showView();
+  const view = document.getElementById('view-area');
+  view.innerHTML = '<div style="text-align:center;color:var(--fg3);margin-top:120px"><span class="spinner"></span> Loading...</div>';
+
+  try {
+    const url = `/api/notes/${encodeURIComponent(pid)}?filename=${encodeURIComponent(paper.note_file || '')}`;
+    const res = await fetch(url);
+    if (myReq !== reqId) return;
+    if (!res.ok) { view.innerHTML = '<div style="text-align:center;color:var(--fg3);margin-top:120px"><p>Note not found</p></div>'; return; }
+    const data = await res.json();
+    if (myReq !== reqId) return;
+    const content = data.content;
+    if (!content) { view.innerHTML = '<div style="text-align:center;color:var(--fg3);margin-top:120px"><p>No note content</p></div>'; return; }
+
+    view.innerHTML = `<div class="note-body">${renderMd(content)}</div>`;
+    if (myReq !== reqId) return;
+    document.getElementById('content').scrollTop = 0;
+    renderKatex(view);
+  } catch(e) {
+    if (myReq !== reqId) return;
+    view.innerHTML = `<div style="text-align:center;color:var(--fg3);margin-top:120px"><p>Error: ${esc(e.message)}</p></div>`;
+  }
+}
+
+// ── Upload ──
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('dragover');
+  const files = e.dataTransfer.files;
+  if (files.length > 0) {
+    // Filter PDFs from potentially mixed drops (e.g. folder + files)
+    uploadFiles(Array.from(files).filter(f => f.name.toLowerCase().endsWith('.pdf')));
+  }
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length > 0) uploadFiles(Array.from(fileInput.files));
+});
+
+async function* readSSE(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try { yield JSON.parse(line.slice(6)); } catch(e) {}
+      }
+    }
+  }
+}
+
+async function uploadFiles(files) {
+  const status = document.getElementById('upload-status');
+  if (!files.length) return;
+  const total = files.length;
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const label = total > 1 ? `[${i + 1}/${total}] ` : '';
+    status.innerHTML = `<span class="spinner"></span> ${label}Importing ${esc(file.name)}...`;
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('/api/import', { method:'POST', body:form });
+      if (!res.ok) {
+        const err = await res.json();
+        status.innerHTML = `<span style="color:var(--red)">✗ ${label}${esc(file.name)}: ${esc(err.error || 'Server error')}</span>`;
+        continue;
+      }
+      for await (const ev of readSSE(res)) {
+        if (ev.event === 'status') {
+          status.innerHTML = `<span class="spinner"></span> ${label}${esc(ev.message)}`;
+        } else if (ev.event === 'error') {
+          status.innerHTML = `<span style="color:var(--red)">✗ ${label}${esc(ev.message)}</span>`;
+          break;
+        } else if (ev.event === 'done') {
+          if (ev.status === 'skipped') {
+            status.innerHTML = `<span style="color:var(--fg3)">⚠ ${label}Already indexed</span>`;
+          } else {
+            status.innerHTML = `<span style="color:var(--green)">✓ ${label}${esc(ev.note_file || ev.paper_id)}</span>`;
+          }
+        }
+      }
+    } catch(e) {
+      status.innerHTML = `<span style="color:var(--red)">✗ ${label}${esc(e.message)}</span>`;
+    }
+  }
+  loadPapers();
+}
+
+// ── Scan import dirs ──
+async function scanImport(force) {
+  const status = document.getElementById('upload-status');
+  status.innerHTML = '<span class="spinner"></span> Scanning import directories...';
+  try {
+    const res = await fetch(`/api/import-scan?force=${force ? '1' : '0'}`, { method:'POST' });
+    for await (const ev of readSSE(res)) {
+      if (ev.event === 'status') {
+        status.innerHTML = `<span class="spinner"></span> ${esc(ev.message)}`;
+      } else if (ev.event === 'error') {
+        status.innerHTML = `<span style="color:var(--red)">✗ ${esc(ev.message)}</span>`;
+        return;
+      } else if (ev.event === 'done') {
+        status.innerHTML = `<span style="color:var(--green)">✓ Import complete ${ev.usage || ''}</span>`;
+        loadPapers();
+      }
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red)">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+async function cleanDuplicates() {
+  const status = document.getElementById('upload-status');
+  status.innerHTML = '<span class="spinner"></span> Checking for duplicate entries...';
+  try {
+    const res = await fetch('/api/clean-duplicates', { method: 'POST' });
+    const data = await res.json();
+    if (data.ok) {
+      if (data.removed > 0) {
+        const dupInfo = Object.entries(data.duplicates || {}).map(([k,v]) => `${k} (${v}x)`).join(', ');
+        status.innerHTML = `<span style="color:var(--green)">✓ Removed ${data.removed} duplicate rows: ${esc(dupInfo)}</span>`;
+      } else {
+        status.innerHTML = `<span style="color:var(--green)">✓ No duplicates found</span>`;
+      }
+      loadPapers();
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red)">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+async function reindexOrphans() {
+  const status = document.getElementById('upload-status');
+  status.innerHTML = '<span class="spinner"></span> Checking for orphan notes...';
+  try {
+    const res = await fetch('/api/reindex-orphans', { method: 'POST' });
+    for await (const ev of readSSE(res)) {
+      if (ev.event === 'status') {
+        status.innerHTML = `<span class="spinner"></span> ${esc(ev.message)}`;
+      } else if (ev.event === 'error') {
+        status.innerHTML = `<span style="color:var(--red)">✗ ${esc(ev.message)}</span>`;
+        return;
+      } else if (ev.event === 'done') {
+        status.innerHTML = `<span style="color:var(--green)">✓ ${esc(ev.message || 'Re-index complete')}</span>`;
+        loadPapers();
+      }
+    }
+  } catch(e) {
+    status.innerHTML = `<span style="color:var(--red)">✗ ${esc(e.message)}</span>`;
+  }
+}
+
+// ── Command executor ──
+function toggleCmdHelp() {
+  const el = document.getElementById('cmd-help');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function runCmd() {
+  const input = document.getElementById('cmd-input');
+  const cmd = input.value.trim();
+  if (!cmd) return;
+
+  const isAsk = /^ask\b/.test(cmd);
+  const out = document.getElementById('cmd-output');
+
+  if (isAsk) {
+    // Route ask output to main content area (same as RAG panel)
+    const myReq = ++reqId;
+    document.getElementById('toolbar-title').textContent = 'Q&A (cmd)';
+    document.getElementById('toolbar-usage').textContent = '';
+    showView();
+    const view = document.getElementById('view-area');
+    view.innerHTML =
+      `<p style="color:var(--fg2);margin-bottom:12px">$ ${esc(cmd)}</p>
+       <div id="qa-status"><span class="spinner"></span> Starting...</div>
+       <div id="qa-answer" class="answer-body"></div>`;
+    const statusEl = document.getElementById('qa-status');
+    const answerEl = document.getElementById('qa-answer');
+    let answerText = '';
+    out.innerHTML = '<span style="color:var(--fg3)">▶ Running in main view...</span>';
+
+    try {
+      const form = new FormData();
+      form.append('cmd', cmd);
+      const res = await fetch('/api/cmd', { method:'POST', body:form });
+      if (myReq !== reqId) return;
+      for await (const ev of readSSE(res)) {
+        if (myReq !== reqId) break;
+        if (ev.event === 'status') {
+          statusEl.innerHTML = `<span class="spinner"></span> ${esc(ev.message)}`;
+        } else if (ev.event === 'token') {
+          answerText += ev.text;
+          answerEl.innerHTML = renderMd(answerText);
+          document.getElementById('content').scrollTop = document.getElementById('content').scrollHeight;
+        } else if (ev.event === 'done') {
+          statusEl.innerHTML = '';
+          answerEl.innerHTML = renderMd(answerText);
+          document.getElementById('toolbar-usage').textContent = ev.usage || '';
+          renderKatex(view);
+          out.innerHTML = '<span style="color:var(--green)">✓ Done</span>';
+        } else if (ev.event === 'error') {
+          statusEl.innerHTML = '';
+          answerEl.innerHTML = `<p style="color:var(--red)">${esc(ev.message)}</p>`;
+          out.innerHTML = `<span style="color:var(--red)">Error: ${esc(ev.message)}</span>`;
+        }
+      }
+    } catch(e) {
+      if (e.name === 'AbortError' || myReq !== reqId) return;
+      out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+    }
+    return;
+  }
+
+  // Non-ask commands: output to cmd-output area as before
+  out.innerHTML = '<span class="spinner"></span> Running...';
+  try {
+    const form = new FormData();
+    form.append('cmd', cmd);
+    const res = await fetch('/api/cmd', { method:'POST', body:form });
+    out.innerHTML = '';
+    let hasOutput = false;
+    for await (const ev of readSSE(res)) {
+      if (ev.event === 'output') {
+        hasOutput = true;
+        out.innerHTML += esc(ev.text) + '\n';
+      } else if (ev.event === 'status') {
+        out.innerHTML += `<span style="color:var(--fg3)">${esc(ev.message)}</span>\n`;
+      } else if (ev.event === 'token') {
+        hasOutput = true;
+        out.innerHTML += esc(ev.text || '');
+      } else if (ev.event === 'error') {
+        out.innerHTML += `<span style="color:var(--red)">Error: ${esc(ev.message)}</span>\n`;
+      } else if (ev.event === 'done') {
+        if (!hasOutput) out.innerHTML += `<span style="color:var(--green)">Done ${esc(ev.message || '')} ${esc(ev.usage || '')}</span>\n`;
+      }
+      out.scrollTop = out.scrollHeight;
+    }
+    loadPapers();
+  } catch(e) {
+    out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`;
+  }
+}
+
+// ── Q&A ──
+let qaAbort = null;  // AbortController for in-flight Q&A
+
+async function doAsk() {
+  // If already running, cancel
+  if (qaAbort) {
+    qaAbort.abort();
+    qaAbort = null;
+    document.getElementById('qa-ask-btn').disabled = false;
+    document.getElementById('qa-ask-btn').textContent = 'Ask';
+    return;
+  }
+
+  const question = document.getElementById('qa-input').value.trim();
+  if (!question) return;
+
+  const myReq = ++reqId;
+  const controller = new AbortController();
+  qaAbort = controller;
+
+  const btn = document.getElementById('qa-ask-btn');
+  btn.textContent = 'Cancel';
+  btn.style.background = 'var(--red)';
+
+  document.getElementById('toolbar-title').textContent = 'Q&A';
+  document.getElementById('toolbar-usage').textContent = '';
+  showView();
+  const view = document.getElementById('view-area');
+  view.innerHTML =
+    `<p style="color:var(--fg2);margin-bottom:12px">Q: ${esc(question)}</p>
+     <div id="qa-status"><span class="spinner"></span> Starting...</div>
+     <div id="qa-answer" class="answer-body"></div>`;
+
+  const statusEl = document.getElementById('qa-status');
+  const answerEl = document.getElementById('qa-answer');
+  let answerText = '';
+
+  const form = new FormData();
+  form.append('question', question);
+  form.append('n_papers', document.getElementById('qa-n').value || '5');
+  form.append('detail', document.getElementById('qa-detail').value);
+  const mt = document.getElementById('qa-max-tokens').value;
+  if (mt) form.append('max_tokens', mt);
+
+  try {
+    const res = await fetch('/api/ask', { method:'POST', body:form, signal: controller.signal });
+    if (myReq !== reqId) return;
+    if (!res.ok) { view.innerHTML = `<p style="color:var(--red)">Server error</p>`; return; }
+    for await (const ev of readSSE(res)) {
+      if (myReq !== reqId) break;
+      if (ev.event === 'status') {
+        statusEl.innerHTML = `<span class="spinner"></span> ${esc(ev.message)}`;
+      } else if (ev.event === 'token') {
+        answerText += ev.text;
+        answerEl.innerHTML = renderMd(answerText);
+        document.getElementById('content').scrollTop = document.getElementById('content').scrollHeight;
+      } else if (ev.event === 'done') {
+        statusEl.innerHTML = '';
+        answerEl.innerHTML = renderMd(answerText);
+        document.getElementById('toolbar-usage').textContent = ev.usage || '';
+        renderKatex(view);
+      }
+    }
+  } catch(e) {
+    if (e.name === 'AbortError') { view.innerHTML = '<p style="color:var(--fg3);margin-top:120px">Cancelled</p>'; return; }
+    if (myReq !== reqId) return;
+    view.innerHTML = `<p style="color:var(--red)">Error: ${esc(e.message)}</p>`;
+  } finally {
+    qaAbort = null;
+    btn.textContent = 'Ask';
+    btn.style.background = '';
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('qa-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); doAsk(); }
+});
+
+// ── Helpers ──
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ── Settings ──
+let settingsData = {};
+let promptData = {};  // {prompts: {...}, defaults: {...}, overrides: {...}}
+let browseTarget = null;
+let browsePath = '';
+
+async function showSettings() {
+  activePid = null;
+  document.querySelectorAll('#paper-list li').forEach(el => el.classList.remove('active'));
+  document.getElementById('empty-state').style.display = 'none';
+  document.getElementById('view-area').style.display = 'none';
+  document.getElementById('settings-page').style.display = 'block';
+  document.getElementById('toolbar-title').textContent = 'Settings';
+  document.getElementById('toolbar-usage').textContent = '';
+  try {
+    const [sr, pr] = await Promise.all([
+      fetch('/api/settings'),
+      fetch('/api/prompts'),
+    ]);
+    settingsData = await sr.json();
+    promptData = await pr.json();
+  } catch(e) { settingsData = {}; promptData = {}; }
+  buildSettingsForm();
+}
+
+function pathRow(key, label, desc, value) {
+  const val = value || '';
+  return `<div class="settings-row">
+    <div class="settings-row-top">
+      <label title="${esc(desc)}">${label}</label>
+      <input name="${key}" value="${esc(String(val))}" data-key="${key}">
+      <button type="button" onclick="browseNative('${key}')" title="Open native folder picker">📂</button>
+    </div>
+    <span class="settings-desc">${desc}</span>
+  </div>`;
+}
+
+function textRow(key, label, desc, value, type) {
+  const val = value ?? '';
+  const isNum = type === 'number';
+  return `<div class="settings-row">
+    <div class="settings-row-top">
+      <label title="${esc(desc)}">${label}</label>
+      <input name="${key}" value="${esc(String(val))}" type="${isNum ? 'number' : 'text'}" step="any" style="font-family:${isNum ? 'monospace' : 'inherit'}">
+    </div>
+    <span class="settings-desc">${desc}</span>
+  </div>`;
+}
+
+function buildSettingsForm() {
+  const p = settingsData.paths || {};
+  const m = settingsData.models || {};
+  const il = settingsData.import_limits || {};
+  const idx = settingsData.indexing || {};
+  const md = settingsData.metadata || {};
+  const ng = settingsData.note_gen || {};
+  const rag = settingsData.rag || {};
+  const at = settingsData.answer_tokens || {};
+
+  let html = '';
+  html += `<div class="settings-section"><h3>Paths</h3>`;
+  html += pathRow('import_dirs', 'PDF source', 'Colon-separated directories to scan for PDFs on import', (p.import_dirs || []).join(':'));
+  html += pathRow('notes_dir', 'Notes', 'Where structured reading notes are saved', p.notes_dir);
+  html += pathRow('vectors_dir', 'Vector index', 'LanceDB vector database storage', p.vectors_dir);
+  html += pathRow('extracted_dir', 'Extracted text', 'Cached raw text extracted from PDFs', p.extracted_dir);
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Models (restart required)</h3>`;
+  html += textRow('llm_base_url', 'API base URL', 'OpenAI-compatible API endpoint', m.llm_base_url);
+  html += textRow('llm_model', 'Primary model', 'Used for note generation and RAG answers. Quality over speed', m.llm_model);
+  html += textRow('light_model_id', 'Light model', 'Used for metadata extraction, RAG judge, section matching. Speed over quality', m.light_model_id);
+  html += textRow('embedding_model', 'Embedding model', 'Local sentence-transformers model. Changing requires re-index with --force', m.embedding_model);
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Import Limits</h3>`;
+  html += textRow('max_pdf_mb', 'Max PDF size (MB)', 'PDFs larger than this are rejected on import. Empty = unlimited', il.max_pdf_mb, 'number');
+  html += textRow('max_upload_mb', 'Max upload size (MB)', 'Web UI upload limit enforced via Content-Length header', il.max_upload_mb, 'number');
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Indexing</h3>`;
+  html += textRow('chunk_size', 'Chunk size (chars)', 'Text chunk size. Smaller = more precise retrieval but larger index', idx.chunk_size, 'number');
+  html += textRow('chunk_overlap', 'Chunk overlap (chars)', 'Overlap between adjacent chunks to avoid splitting sentences/paragraphs', idx.chunk_overlap, 'number');
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Metadata Extraction</h3>`;
+  html += textRow('metadata_snippet_chars', 'Snippet chars', 'Characters from page 1 sent to LLM for title/author/year extraction', md.metadata_snippet_chars, 'number');
+  html += textRow('meta_extract_max_tokens', 'Max tokens', 'LLM output token limit for metadata JSON response', md.meta_extract_max_tokens, 'number');
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Note Generation</h3>`;
+  html += textRow('note_gen_temperature', 'Temperature', 'LLM creativity (0-2). Lower = more factual, higher = more varied phrasing', ng.note_gen_temperature, 'number');
+  html += textRow('note_gen_max_tokens', 'Max tokens', 'Max output tokens for the structured reading note', ng.note_gen_max_tokens, 'number');
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>RAG Q&A</h3>`;
+  html += textRow('rag_qa_temperature', 'Answer temperature', 'LLM creativity for final answers. Lower = stick closer to retrieved text', rag.rag_qa_temperature, 'number');
+  html += textRow('rag_detail_moderate_divisor', 'Moderate divisor', 'per_paper = max(min, ceil(chunk_count / divisor)). Used when judge picks level 2', rag.rag_detail_moderate_divisor, 'number');
+  html += textRow('rag_detail_extensive_divisor', 'Extensive divisor', 'Same formula, used when judge picks level 3 (more detail)', rag.rag_detail_extensive_divisor, 'number');
+  html += textRow('rag_detail_moderate_min', 'Moderate min chunks', 'Minimum chunks per paper for level 2, regardless of divisor result', rag.rag_detail_moderate_min, 'number');
+  html += textRow('rag_detail_extensive_min', 'Extensive min chunks', 'Minimum chunks per paper for level 3', rag.rag_detail_extensive_min, 'number');
+  html += '</div>';
+
+  html += `<div class="settings-section"><h3>Answer Token Budget</h3>`;
+  html += textRow('answer_tokens_tier_1', '1 paper', 'max_tokens when answering from 1 paper (auto mode)', at.answer_tokens_tier_1, 'number');
+  html += textRow('answer_tokens_tier_2', '2 papers', 'max_tokens when answering from 2 papers', at.answer_tokens_tier_2, 'number');
+  html += textRow('answer_tokens_tier_3', '3+ papers', 'max_tokens when answering from 3+ papers', at.answer_tokens_tier_3, 'number');
+  html += '</div>';
+
+  document.getElementById('settings-form').innerHTML = html;
+  buildPromptsSection();
+}
+
+// ── Prompts section (loaded async) ──
+
+const PROMPT_LABELS = {
+  note_prompt: 'Note generation',
+  meta_prompt: 'Metadata extraction',
+  qa_prompt: 'RAG Q&A answer',
+  need_details_prompt: 'Detail judge (1-3)',
+  batch_section_match_prompt: 'Section matching',
+  filter_papers_prompt: 'Paper relevance filter',
+};
+
+const PROMPT_DESCS = {
+  note_prompt: 'Generates structured Chinese reading notes from paper text. Variables: {text}',
+  meta_prompt: 'Extracts title, authors, year, venue, keywords as JSON. Variables: {text}',
+  qa_prompt: 'Final RAG answer generation from retrieved context. Variables: {context}, {question}',
+  need_details_prompt: 'Decides detail level needed (1=notes, 2=moderate, 3=extensive). Variables: {question}, {context}',
+  batch_section_match_prompt: 'Matches question to relevant paper sections. Variables: {question}, {papers}',
+  filter_papers_prompt: 'Selects relevant papers from candidates. Variables: {question}, {papers}',
+};
+
+function buildPromptsSection() {
+  const prompts = promptData.prompts || {};
+  const defaults = promptData.defaults || {};
+  const keys = Object.keys(PROMPT_LABELS);
+  if (!keys.length) return;
+
+  const form = document.getElementById('settings-form');
+  let html = '';
+  html += `<div class="settings-section"><h3>Prompts (no restart needed)</h3>`;
+  html += `<p style="font-size:11px;color:var(--fg3);margin-bottom:8px">Edit LLM prompts. Changes take effect immediately. Click a label to reset to default.</p>`;
+  for (const key of keys) {
+    const label = PROMPT_LABELS[key] || key;
+    const desc = PROMPT_DESCS[key] || '';
+    const val = prompts[key] || '';
+    const isOverride = (promptData.overrides || {})[key] !== undefined;
+    html += `<div class="prompt-row">`;
+    html += `<label title="${esc(desc)}">${label} <span class="prompt-reset" onclick="resetPrompt('${key}')" title="Reset to default">${isOverride ? '(modified — click to reset)' : '(default)'}</span></label>`;
+    html += `<textarea name="prompt_${key}" data-prompt-key="${key}" data-default="${esc(defaults[key] || '')}">${esc(val)}</textarea>`;
+    html += `<div class="prompt-desc">${esc(desc)}</div>`;
+    html += `</div>`;
+  }
+  html += `</div>`;
+  form.insertAdjacentHTML('beforeend', html);
+}
+
+function resetPrompt(key) {
+  const textarea = document.querySelector(`[data-prompt-key="${key}"]`);
+  if (textarea) {
+    textarea.value = textarea.dataset.default || '';
+    // Update the label
+    const row = textarea.closest('.prompt-row');
+    if (row) {
+      const reset = row.querySelector('.prompt-reset');
+      if (reset) reset.textContent = '(default)';
+    }
+  }
+}
+
+// ── Native folder picker ──
+async function browseNative(targetKey) {
+  try {
+    const res = await fetch('/api/browse-native', { method: 'POST' });
+    const data = await res.json();
+    if (data.path) {
+      const input = document.querySelector(`[data-key="${targetKey}"]`);
+      if (input) input.value = data.path;
+    } else if (data.error) {
+      alert(data.error);
+    }
+  } catch(e) {
+    alert('Native picker failed: ' + e.message);
+  }
+}
+
+// ── Folder browser (modal fallback, kept for reference) ──
+async function openBrowse(targetKey) {
+  browseTarget = targetKey;
+  const input = document.querySelector(`[data-key="${targetKey}"]`);
+  browsePath = input?.value || '/';
+  document.getElementById('browse-modal').classList.add('show');
+  await navigateBrowse(browsePath);
+}
+
+function closeBrowse() {
+  document.getElementById('browse-modal').classList.remove('show');
+  browseTarget = null;
+}
+
+async function navigateBrowse(path) {
+  browsePath = path;
+  document.getElementById('browse-path').textContent = path;
+  const list = document.getElementById('browse-list');
+  list.innerHTML = '<div style="padding:12px;color:var(--fg3)">Loading...</div>';
+  try {
+    const res = await fetch(`/api/browse?path=${encodeURIComponent(path)}`);
+    const data = await res.json();
+    if (data.error) { list.innerHTML = `<div style="padding:12px;color:var(--red)">${esc(data.error)}</div>`; return; }
+    let html = '';
+    if (data.parent != null) {
+      html += `<div class="browse-item" onclick="navigateBrowse('${esc(data.parent)}')"><span class="icon">📁</span> ..</div>`;
+    }
+    for (const item of data.items) {
+      html += `<div class="browse-item" ondblclick="selectBrowsePath('${esc(item.path)}')" onclick="navigateBrowse('${esc(item.path)}')"><span class="icon">📁</span> ${esc(item.name)}</div>`;
+    }
+    list.innerHTML = html || '<div style="padding:12px;color:var(--fg3)">No subdirectories</div>';
+  } catch(e) {
+    list.innerHTML = `<div style="padding:12px;color:var(--red)">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function selectBrowseFolder() { selectBrowsePath(browsePath); }
+
+function selectBrowsePath(path) {
+  if (!browseTarget) return;
+  const input = document.querySelector(`[data-key="${browseTarget}"]`);
+  if (input) input.value = path;
+  closeBrowse();
+}
+
+async function saveSettings() {
+  const data = {};
+  const promptOverrides = {};
+  document.querySelectorAll('#settings-form input, #settings-form textarea').forEach(el => {
+    const key = el.name;
+    let val = el.value.trim();
+    // Collect prompt values separately
+    if (key.startsWith('prompt_')) {
+      if (val) promptOverrides[el.dataset.promptKey] = val;
+      return;
+    }
+    if (val === '' || val === null || val === undefined) {
+      data[key] = null;
+    } else if (el.type === 'number') {
+      data[key] = Number(val);
+    } else {
+      data[key] = val;
+    }
+  });
+
+  const status = document.getElementById('settings-status');
+  status.textContent = 'Saving...';
+  status.style.color = 'var(--fg3)';
+
+  try {
+    const results = await Promise.all([
+      fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      }),
+      fetch('/api/prompts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(promptOverrides),
+      }),
+    ]);
+    const [sr, pr] = await Promise.all(results.map(r => r.json()));
+    if (sr.ok) {
+      const nPrompts = pr.saved || 0;
+      let msg = 'Saved';
+      if (nPrompts > 0) msg += ` (${nPrompts} prompt overrides updated)`;
+      msg += ' — some path/model changes require restart';
+      status.textContent = msg;
+      status.style.color = 'var(--green)';
+      setTimeout(() => { status.textContent = ''; }, 5000);
+    }
+  } catch(e) {
+    status.textContent = 'Error saving';
+    status.style.color = 'var(--red)';
+  }
+}
+
+// Close browse modal on overlay click
+document.getElementById('browse-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeBrowse();
+});
+
+// ── Init ──
+loadPapers();
+</script>
+</body>
+</html>

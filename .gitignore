@@ -1,0 +1,14 @@
+.env
+__pycache__/
+.venv/
+test_output/
+test_notes/
+*.pyc
+.DS_Store
+.idea/
+extracted/
+vault/
+papers/
+test_marker.py
+*.egg-info/
+*.pdf

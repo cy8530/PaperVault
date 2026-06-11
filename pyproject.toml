@@ -1,0 +1,49 @@
+[project]
+name = "paper-vault"
+version = "0.1.0"
+description = "CLI tool for personal paper reading and note management"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Yao Chen"}
+]
+keywords = ["paper", "pdf", "rag", "notes", "research"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pymupdf>=1.23.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "sentence-transformers>=3.0.0",
+    "lancedb>=0.6.0",
+    "pyarrow>=14.0.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.23.0",
+    "python-multipart>=0.0.6",
+]
+
+[project.scripts]
+pv = "paper_vault.cli.main:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["paper_vault*"]
