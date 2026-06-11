@@ -12,3 +12,5 @@ papers/
 test_marker.py
 *.egg-info/
 *.pdf
+OPTIMIZATION_BACKLOG.md
+DESIGN.md
