@@ -350,7 +350,7 @@ Web UI 的 Settings 页面保存的配置存储在 `vault/settings.json`。优�
 
 ## 技术文档
 
-详见 [IMPLEMENTATION.md](IMPLEMENTATION.md)（实现细节、设计决策、已知问题）和 [DESIGN.md](DESIGN.md)（项目定位、架构设计）。
+详见 [IMPLEMENTATION.md](IMPLEMENTATION.md)（实现细节、设计决策、已知问题）。
 
 ## License
 
