@@ -351,7 +351,7 @@ All data is plain text. Notes can be opened and edited in Obsidian, VS Code, or 
 
 ## Further Reading
 
-See [IMPLEMENTATION.md](IMPLEMENTATION.md) (implementation details, design decisions, known issues) and [DESIGN.md](DESIGN.md) (project positioning, architecture design).
+See [IMPLEMENTATION.md](IMPLEMENTATION.md) (implementation details, design decisions, known issues).
 
 ## License
 
