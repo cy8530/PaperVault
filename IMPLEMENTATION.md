@@ -250,19 +250,21 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 
 | 函数 | 职责 | 输入 | 输出 |
 |------|------|------|------|
-| `_gather_context()` | Stage 1-3 统一入口：嵌入→搜索→过滤→判定→检索 | question, n_papers, ... | (status_msgs, context, answer_tokens) |
+| `_gather_context()` | Stage 1-3 统一入口：嵌入→多向量搜索→过滤→判定→检索 | question, n_papers, ... | (status_msgs, context, answer_tokens, notes_results, all_chunks) |
 | `_search_and_filter()` | 嵌入 + 召回 + LLM 筛选 | question, n_papers, where [, query_vec] | notes_results |
 | `_determine_detail()` | 判定细节深度 | question, notes_results, detail | (level, full_text) |
 | `_match_sections_batch()` | 批量章节匹配 | question, notes_results | {paper_id: [sections]} |
 | `_answer_tokens()` | token 预算计算 | n_papers, max_tokens | answer_tokens |
 | `_format_context()` | 统一上下文拼装 | items, prefix, text_key | context_string |
+| `_multi_vector_search()` | Query 分解 + 多向量检索合并 | search_text, where, progress_emit | merged_results |
+| `_divide_conquer_answer()` | 分治回答（逐篇 + 综合） | question, notes_results, all_chunks, ... | answer |
 | `_call_light_llm()` | 轻量 LLM 调用封装 | prompt, label, max_tokens | raw_response |
 
 **Public API：**
 | 函数 | 用途 | 返回方式 |
 |------|------|----------|
-| `ask()` | CLI 同步 Q&A | 直接 return 答案字符串 |
-| `ask_stream()` | Web SSE 流式 Q&A | yield SSE 事件 |
+| `ask()` | CLI 同步 Q&A（支持 `divide_conquer` 参数） | 直接 return 答案字符串 |
+| `ask_stream()` | Web SSE 流式 Q&A（支持 `divide_conquer` 参数） | yield SSE 事件 |
 
 两者均调用 `_gather_context()` 获取上下文，然后各自完成 LLM 调用。避免了原来 `_run_rag` 生成器中 `Streaming=False` 时靠 `StopIteration.value` 传回返回值的隐式行为。
 
@@ -277,45 +279,48 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 ```
 用户提问
   → _gather_context()
-       → embed_texts([question])  (一次)
-       → _search_and_filter(query_vec=...)
-            → search_notes(top_k=max(n*2, 10)) → 扩大召回
+       → embed_texts([search_query])  (一次)
+       → _multi_vector_search() → Query 分解为 N 个变体 → 多向量检索 → 合并去重
+       → _search_and_filter(query_vec=..., broad_results=...)
+            → search_notes(top_k=max(n, 10), distance_threshold=...) → 带回相似度阈值
             → _call_light_llm(FILTER_PAPERS_PROMPT) → 筛选相关论文 (≤ n 篇)
        → _determine_detail() / 用户 -d 参数覆盖
-            1 = notes 足够 → 直接用 notes 生成答案
+            1 = notes + 少量 chunks → per_paper = min(3, chunk_count)
             2 = 需要关键细节 → per_paper = max(5, ceil(chunk_count/8))
             3 = 需要大量细节 → per_paper = max(15, ceil(chunk_count/3))
             all = 全量检索   → per_paper = chunk_count (所有 chunks)
-       → _match_sections_batch() → 批量章节匹配 (一次轻量 LLM 调用)
-       → search_chunks_for_papers(sections=matched) → 定向检索 (复用 query_vec)
-       → _format_context() → 统一拼装 notes + chunks context
-       → 返回 (status_msgs, context, answer_tokens)
+       → _match_sections_batch() → 批量章节匹配 (一次轻量 LLM 调用，并行于 Judge)
+       → search_chunks_for_papers(sections=matched, distance_threshold=...) → 定向检索
+       → _format_context() → 统一拼装 notes + chunks context (含年份标注)
+       → 返回 (status_msgs, context, answer_tokens, notes_results, all_chunks)
   → ask() / ask_stream()
-       → LLM(QA_PROMPT) → 回答 (同步返回 / SSE 流式)
+       → divide_conquer? → 逐篇回答 → 综合  或  直接 LLM(QA_PROMPT) → 回答
 ```
 
 **Judge 三级机制：**
 - `NEED_DETAILS_PROMPT`：将问题 + notes 内容发给 LLM，评估需要多少额外细节
-- 返回 1（notes 足够）、2（中等）、3（大量）
+- 返回 1（notes + 少量 chunks）、2（中等）、3（大量）
+- Prompt 明确偏向 level 2/3（"default to level 2 or 3 for technical questions"），避免过于保守
 - 使用 `LIGHT_MODEL_ID`，`max_tokens` 由 `config.RAG_JUDGE_MAX_TOKENS` 控制（默认 10）
 - 解析失败时默认回退到 2
 
 **用户 detail 覆盖（CLI: `-d`/`--detail`）：**
-- `-d 1`：跳过 judge，仅用 notes（最省 token）
+- `-d 1`：跳过 judge，notes + 少量 chunks（快速概览，含关键事实）
 - `-d 2`：跳过 judge，中等 chunks
 - `-d 3`：跳过 judge，大量 chunks
 - `-d all`：跳过 judge 和章节匹配，拉取全部 chunks（全文检索）
-- 默认 `auto`：LLM judge 自动判定
+- 默认 `auto`：LLM judge 自动判定（偏向 level 2/3）
 
 **论文相关性筛选（`_search_and_filter`）：**
-- 初始检索 2x n_papers（至少 10 篇）→ 轻量 LLM 选择相关论文 → 保留 ≤ n_papers 篇
-- 解决向量检索 top-k 截断导致遗漏的问题（例如问题覆盖 10 篇论文但 top-5 只召回部分）
+- 初始检索 n_papers 篇（至少 10 篇）→ 轻量 LLM 选择相关论文 → 保留 ≤ n_papers 篇
+- 结合多向量检索（覆盖不同术语表述）+ 相似度阈值过滤（排除弱相关）弥补取消 2x 扩召后的召回
 - LLM JSON 解析失败时回退到原始 top-n（通过 `parse_llm_json` 工具函数统一处理）
+- 支持接收预计算的 `broad_results`（来自 `_multi_vector_search`），跳过内部检索仅执行 LLM 筛选
 
 **chunk 分配公式（参数由 config 集中管理）：**
 | 等级 | 公式 | 60-chunk 论文 | 含义 | 配置项 |
 |------|------|-------------|------|--------|
-| 1 | 0 | 0 | notes only | — |
+| 1 | min(MIN, chunk_count) | ~3 | notes + 少量 chunks | `RAG_LEVEL1_MIN_CHUNKS`=3 |
 | 2 | max(MIN, ceil(N/DIV)) | ~8 | 关键细节 | `RAG_DETAIL_MODERATE_MIN`=5, `RAG_DETAIL_MODERATE_DIVISOR`=8 |
 | 3 | max(MIN, ceil(N/DIV)) | ~20 | 大量细节 | `RAG_DETAIL_EXTENSIVE_MIN`=15, `RAG_DETAIL_EXTENSIVE_DIVISOR`=3 |
 | all | N | 60 | 全量 chunks | — |
@@ -330,35 +335,107 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 
 **Context 拼装（`_format_context` 统一处理）：**
 - 检索结果按 (paper_id, chunk_idx) 排序，保证同一论文的 chunks 出现在一起且按原文顺序
-- Notes 标注 `[Source: notes/{paper_id} | Paper: ...]`
-- Chunks 标注 `[Detail: {paper_id}/chunk_{idx} | Paper: ... | Section: ...]`
+- Notes 标注 `[Paper | Title (Year)]`
+- Chunks 标注 `[Detail | Title (Year) | chunk_N | Section: name]`
+- 年份从 LanceDB 元数据读取，帮助 LLM 区分同主题不同时期的论文
 
-**LLM 调用链路分析：**
+### 6.1.1 Query 分解 + 多向量检索（2026-06 新增）
+
+**实现：** `qa.py::_multi_vector_search()` + `prompts.py::QUERY_DECOMPOSE_PROMPT`
+
+**设计动机：**
+- 单一查询向量难以覆盖不同论文对同一概念的不同表述（如 "因果图" vs "causal graph" vs "因果结构"）
+- 跨论文综述类问题语义覆盖面广，单一向量检索的 Recall@5 仅 0.50（benchmark 实测）
+- 对**所有问题**默认启用（不区分单论文/跨论文），因为即使单论文问题也可能因术语差异导致目标论文排名靠后
+
+**实现细节：**
+- LLM 将原始 query 分解为 N 个语义变体（`RAG_QUERY_VARIANTS` 配置，默认 3）
+- 原始 query + N 个变体分别嵌入 → 分别检索 notes_index
+- 按 paper_id 合并结果（保留最小 `_distance`）
+- 合并后的候选集传入 `_search_and_filter` 进行 LLM 筛选
+- 此步骤在 `_gather_context` Stage 1 执行，增加 1 次轻量 LLM 调用 + (N+1) 次本地向量检索
+
+### 6.1.2 Judge 偏向调整 + Level-1 最少 Chunks（2026-06 新增）
+
+**Judge 偏向：** `NEED_DETAILS_PROMPT` 增加引导语："The user expects detailed, thorough answers... default to level 2 or 3"。解决之前 judge 过于保守偏向 level 1 导致回答缺少具体数据的问题。
+
+**Level-1 最少 chunks：** 原来 detail=1 时完全不检索 chunks，回答只有 notes 摘要。现在 level-1 也检索少量 chunks（`RAG_LEVEL1_MIN_CHUNKS`，默认 3/篇），使浅层问题也能获得关键事实支撑（数字、公式等）。Web UI 中 detail 选项 1 的文案从 "Notes only" 改为 "Notes + hints"。
+
+### 6.1.3 Divide & Conquer 分治回答（2026-06 新增）
+
+**实现：** `qa.py::_divide_conquer_answer()` + `prompts.py::DIVIDE_SUB_PROMPT` / `DIVIDE_SYNTHESIS_PROMPT`
+
+**设计动机：**
+- Benchmark 发现跨论文回答 Faithfulness 骤降至 0.50——LLM 同时处理多篇论文的 context 时容易混淆来源或生成无据的对比结论
+- 分治策略：逐篇生成子回答 → 综合所有子回答生成最终答案，每步只需关注单一论文的 context
+
+**实现细节：**
+- `ask()` / `ask_stream()` 新增 `divide_conquer` 参数（默认 False）
+- 触发条件：`divide_conquer=True` 且 `len(notes_results) > 1`
+- 流程：
+  1. 按 paper_id 分组 chunks
+  2. 每篇论文：`_format_context` → `DIVIDE_SUB_PROMPT` → 轻量 LLM 生成子回答
+  3. 所有子回答拼装 → `DIVIDE_SYNTHESIS_PROMPT` → 主模型综合回答（流式输出）
+- Web UI session options 中提供 "Divide & Conquer" 复选框
+- CLI 暂不暴露此参数（默认关闭）
+- 额外 LLM 调用：N 篇论文 = N 次轻量子回答 + 1 次主模型综合
+
+### 6.1.4 相似度阈值过滤 + 移除 2x 扩召（2026-06 新增）
+
+**设计动机：**
+- Benchmark 发现 `all` 模式（全文 chunks）反而比 `auto` 模式忠实度更低（0.50 vs 1.00）——检索到的无关片段噪声干扰 LLM
+- 原来的 2x 扩召（`top_k = n_papers * 2`）在没有相似度过滤的情况下可能引入弱相关论文
+
+**实现细节：**
+
+**相似度阈值（`store.py`）：**
+- `search_notes()` 和 `search_chunks_for_papers()` 新增 `distance_threshold` 参数
+- 检索后过滤：`_distance <= distance_threshold`
+- 默认阈值 `RAG_SEARCH_DISTANCE_THRESHOLD=2.0`（L2 归一化后余弦距离 0-2）
+- 零额外 LLM 调用
+
+**移除 2x 扩召（`qa.py::_search_and_filter`）：**
+- `top_k` 从 `max(n_papers * 2, 10)` 改为 `max(n_papers, 10)`
+- 依赖多向量检索（覆盖不同术语表述）+ 相似度阈值（过滤弱相关）来弥补取消扩召后的召回损失
+- 减少 LLM 筛选阶段的候选论文数 → 降低 filter prompt token 消耗
+
+**变更对比：**
+| 项目 | 旧 | 新 |
+|------|-----|-----|
+| notes 检索 top_k | max(n×2, 10) | max(n, 10) |
+| 相似度过滤 | 无 | _distance ≤ 2.0 |
+| 检索方式 | 单向量 | 多向量 (1+N variants) |
+| Level-1 chunks | 0 | min(3, chunk_count) |
+| Judge 偏向 | 中性 | 偏向 level 2/3 |
 
 一次 RAG 问答（Web UI 多轮对话，detail=auto，level≥2）涉及以下调用：
 
 | # | 调用 | 类型 | 模型 | 耗时 | 触发条件 |
 |---|------|------|------|------|----------|
+| 0 | `query_decompose` Query 分解 | LLM API | 轻量 | 较短 | 总是（`RAG_QUERY_VARIANTS > 0`） |
 | 1 | `_preprocess_question` 问题改写 + 搜索词扩展 | LLM API | 轻量 | 较短 | 有 session 时 |
 | 2 | `paper_filter` 论文相关性筛选 | LLM API | 轻量 | 较短 | 候选论文 > n_papers 时 |
 | 3 | `detail_judge` 深度判断 | LLM API | 轻量 | 中等 | detail=auto 时（默认） |
 | 4 | `section_match` 章节匹配 | LLM API | 轻量 | 中等 | level≥2 且非 full_text 时 |
 | 5 | `answer_generation` 答案生成 | LLM API | 主模型 | **较长** | 总是 |
+| 5a | `divide_sub_answer` 逐篇子回答 | LLM API | 轻量 | 中等 × N | divide_conquer=True 且多篇时 |
+| 5b | `divide_synthesis` 综合回答 | LLM API | 主模型 | **较长** | divide_conquer=True 且多篇时 |
 | 6 | `round_summary` 本轮摘要 | LLM API | 轻量 | 较短 | 有 session 时 |
 | 7 | `history_compact` 历史压缩 | LLM API | 轻量 | 中等 | 完整轮次 > SESSION_KEEP_FULL_ROUNDS 时（偶发） |
 | — | `embed_texts` 问题向量化 | 本地模型 | — | 很短 | 总是（CPU，零 API 费用） |
 | — | `search_notes` / `search_chunks` | 本地向量检索 | — | 很短 | 总是（LanceDB，零 API 费用） |
 
-其中 #3 和 #4 通过后台线程**并行执行**（#4 在 Stage 1 结束后立即启动，与 #3 的 LLM 调用同时进行），#4 的实际耗时被 #3 覆盖。LLM API 调用有效串行阶段为 5 个（#1 → #2 → #3∥#4 → #5 → #6）。
+其中 #3 和 #4 通过后台线程**并行执行**（#4 在 Stage 1 结束后立即启动，与 #3 的 LLM 调用同时进行），#4 的实际耗时被 #3 覆盖。#0（query 分解）在 #2 之前串行执行，增加 1 次轻量调用但本地的 N+1 次向量检索并行。LLM API 调用有效串行阶段为 6 个（#0 → #1 → #2 → #3∥#4 → #5 → #6），divide_conquer 模式下 #5 替换为 #5a×N + #5b。
 
 **各场景调用数：**
 
 | 场景 | LLM API 调用数 | 跳过项 |
 |------|---------------|--------|
-| Web UI 多轮，detail=auto，level≥2 | 6（#7 偶发 +1） | — |
-| Web UI 多轮，detail=1（notes only） | 4 | 跳过 #4 |
-| CLI ask，无 session | 4 | 跳过 #1 #6 #7 |
-| 首轮对话，无历史 | 4 | 跳过 #1 #6 #7（#7 永不触发） |
+| Web UI 多轮，detail=auto，level≥2 | 7（#7 偶发 +1） | — |
+| Web UI 多轮，detail=1（notes + hints） | 5 | 跳过 #4 |
+| CLI ask，无 session | 5 | 跳过 #1 #6 #7 |
+| 首轮对话，无历史 | 5 | 跳过 #1 #6 #7（#7 永不触发） |
+| Divide & Conquer，3 篇论文 | 7 + 3×#5a + #5b | #5 替换为 #5a×3 + #5b |
 
 **调用类型说明：**
 
@@ -555,6 +632,9 @@ pv.py session show <session_id>
 | `PAPER_VAULT_ANSWER_TOKENS_3` | 3072 | 三篇及以上回答 token 预算 |
 | `PAPER_VAULT_SESSION_KEEP_FULL` | 3 | 会话保留完整内容的最近轮数 |
 | `PAPER_VAULT_HISTORY_MAX_TOKENS` | 2000 | 注入 QA prompt 的历史 token 预算上限 |
+| `PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD` | 2.0 | 向量检索相似度阈值（L2 归一化余弦距离 0-2，越大越宽松） |
+| `PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS` | 3 | Level-1 每篇论文检索的最少 chunk 数 |
+| `PAPER_VAULT_RAG_QUERY_VARIANTS` | 3 | Query 分解生成的语义变体数量（0=禁用多向量检索） |
 
 **Web 设置持久化：** 可编辑配置项通过 Web UI 设置页面修改后保存至 `vault/settings.json`，下次启动自动加载。环境变量优先级高于 settings.json。
 
@@ -674,4 +754,4 @@ python pv.py serve [--host 127.0.0.1] [-p 8080]
 
 ---
 
-*最后更新：2026-06-16（LLM 调用链路分析、#1+#2 合并/并行 #4、context 去重、空检索兜底、多轮语义扩展、笔记编辑与 reindex、Web UI settings toggle/detail 选择器/参数自定义输入）*
+*最后更新：2026-06-19（Query 分解多向量检索、Judge 偏向调整 + Level-1 chunks、Divide & Conquer 分治回答、相似度阈值过滤 + 移除 2x 扩召、配置项新增 RAG_SEARCH_DISTANCE_THRESHOLD / RAG_LEVEL1_MIN_CHUNKS / RAG_QUERY_VARIANTS）*

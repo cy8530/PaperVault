@@ -121,7 +121,9 @@ def _format_context(items: list[dict], prefix: str, text_key: str) -> str:
     for item in sorted_items:
         pid = item.get("paper_id", "")
         title = item.get("title") or pid
-        label = f"{prefix}/{pid} | Paper: {title}"
+        year = item.get("year", "")
+        year_str = f" ({year})" if year else ""
+        label = f"{prefix} | {title}{year_str}"
         chunk_idx = item.get("chunk_idx")
         if chunk_idx is not None:
             label += f" | chunk_{chunk_idx}"
@@ -150,16 +152,25 @@ def _call_light_llm(prompt: str, label: str, max_tokens: int = None) -> str:
 # ── Pipeline steps ────────────────────────────────────
 
 def _search_and_filter(question: str, n_papers: int, where: str | None,
-                       query_vec=None, progress=None) -> list[dict]:
-    """Stage 1: Broad semantic search + LLM relevance filter."""
+                       query_vec=None, progress=None,
+                       broad_results: list[dict] = None) -> list[dict]:
+    """Stage 1: Broad semantic search + LLM relevance filter.
+
+    If *broad_results* is given (from multi-vector search), skip the search
+    step and only run the LLM filter.
+    """
     def _emit(msg):
         if progress:
             progress(msg)
 
-    if query_vec is None:
-        query_vec = embed_texts([question], is_query=True)[0]
+    if broad_results is None:
+        if query_vec is None:
+            query_vec = embed_texts([question], is_query=True)[0]
+        broad_results = search_notes(
+            query_vec, top_k=max(n_papers, config.RAG_SEARCH_BREADTH_MIN),
+            where=where, distance_threshold=config.RAG_SEARCH_DISTANCE_THRESHOLD,
+        )
 
-    broad_results = search_notes(query_vec, top_k=max(n_papers * 2, config.RAG_SEARCH_BREADTH_MIN), where=where)
     if not broad_results:
         return []
 
@@ -255,6 +266,51 @@ def _answer_tokens(n_papers: int, max_tokens: int | None) -> int:
     return config.ANSWER_TOKENS_TIER_3
 
 
+def _multi_vector_search(search_text: str, where: str | None,
+                         progress_emit) -> list[dict]:
+    """Generate query variants, embed all, search, merge by best _distance."""
+    n_variants = config.RAG_QUERY_VARIANTS
+    if n_variants <= 0:
+        return []
+
+    progress_emit(f"Decomposing query into {n_variants} variants...")
+    try:
+        raw = _call_light_llm(
+            safe_format(prompts.QUERY_DECOMPOSE_PROMPT, n=n_variants, question=search_text),
+            label="query_decompose", max_tokens=256,
+        )
+        result = parse_llm_json(raw)
+    except Exception:
+        return []
+
+    queries = []
+    if isinstance(result, dict) and "queries" in result:
+        queries = [q for q in result["queries"] if q and q != search_text][:n_variants]
+
+    if not queries:
+        return []
+
+    # Embed original + all variants
+    all_queries = [search_text] + queries
+    all_embeddings = embed_texts(all_queries, is_query=True)
+
+    # Search with each, merge by paper_id (keep lowest _distance)
+    seen = {}
+    for i, vec in enumerate(all_embeddings):
+        results = search_notes(
+            vec, top_k=config.RAG_SEARCH_BREADTH_MIN,
+            where=where, distance_threshold=config.RAG_SEARCH_DISTANCE_THRESHOLD,
+        )
+        for r in results:
+            pid = r["paper_id"]
+            if pid not in seen or r.get("_distance", 999) < seen[pid].get("_distance", 999):
+                seen[pid] = r
+
+    merged = sorted(seen.values(), key=lambda x: x.get("_distance", 999))
+    progress_emit(f"Multi-vector: {len(queries)} variants, merged {len(merged)} unique papers")
+    return merged
+
+
 # ── Core pipeline (stateless) ─────────────────────────
 
 def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
@@ -265,6 +321,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
     """Stages 1-3: search, filter, determine detail, retrieve context.
 
     Embeds the question once and reuses the vector across stages.
+    Uses multi-vector search (query decomposition) to improve recall.
 
     If *search_query* is given, it is used for embedding / vector search
     instead of *question*.  This lets callers inject expanded query terms
@@ -287,11 +344,17 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
     q_embedding = embed_texts([search_text], is_query=True)
     query_vec = q_embedding[0]
 
-    # Stage 1: Search + filter
+    # Stage 1a: Multi-vector search (query decomposition)
+    multi_results = _multi_vector_search(search_text, where, emit)
+
+    # Stage 1b: Search + filter (merges multi-vector results if available)
     emit("Searching papers...")
-    notes_results = _search_and_filter(question, n_papers, where, query_vec=query_vec, progress=emit)
+    notes_results = _search_and_filter(
+        question, n_papers, where, query_vec=query_vec, progress=emit,
+        broad_results=multi_results if multi_results else None,
+    )
     if not notes_results:
-        return status_msgs, None, 0
+        return status_msgs, None, 0, [], []
 
     selected_count = len(notes_results)
     emit(f"Found {selected_count} relevant papers")
@@ -322,13 +385,37 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
         detail_level, full_text = _determine_detail(question, notes_results, detail)
 
     # Stage 3: Retrieve context
+    all_chunks = []
     if detail_level == 1 and not full_text:
-        # No sections needed — skip waiting for section thread
+        # Level 1: notes + minimal chunks for factual grounding
         notes_dedup = _deduplicate_items(notes_results, "note")
-        context = _format_context(notes_dedup, "Source: notes", "note")
+        context = _format_context(notes_dedup, "Paper", "note")
+
+        min_chunks = config.RAG_LEVEL1_MIN_CHUNKS
+        if min_chunks > 0:
+            emit(f"Retrieving minimal chunks ({min_chunks}/paper)...")
+            all_chunks = []
+            for nr in notes_results:
+                pid = nr["paper_id"]
+                cc = nr.get("chunk_count", 0)
+                per = min(min_chunks, max(1, cc))
+                chunks = search_chunks_for_papers(
+                    query_vec, [pid], per_paper=per,
+                    where=where,
+                    distance_threshold=config.RAG_SEARCH_DISTANCE_THRESHOLD,
+                )
+                all_chunks.extend(chunks)
+            if all_chunks:
+                all_chunks = _deduplicate_items(all_chunks, "text")
+                context += "\n\n---\n\n" + _format_context(all_chunks, "Detail", "text")
+                emit(f"Route: notes + {len(all_chunks)} minimal chunks")
+            else:
+                emit("Route: notes only")
+        else:
+            emit("Route: notes only")
+
         if len(notes_dedup) < len(notes_results):
             emit(f"Dedup: {len(notes_results) - len(notes_dedup)} note items merged")
-        emit("Route: notes only")
     else:
         # Need sections — wait for background thread (already running or done)
         if not full_text:
@@ -356,6 +443,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
             chunks = search_chunks_for_papers(
                 query_vec, [pid], per_paper=per_paper,
                 sections=matched if matched else None, where=where,
+                distance_threshold=config.RAG_SEARCH_DISTANCE_THRESHOLD,
             )
             all_chunks.extend(chunks)
 
@@ -373,23 +461,80 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
             route += f", dedup: {chunks_before} → {len(all_chunks)}"
 
         emit(route)
-        context = (_format_context(notes_results, "Source: notes", "note")
+        context = (_format_context(notes_results, "Paper", "note")
                    + "\n\n---\n\n" + _format_context(all_chunks, "Detail", "text"))
 
     answer_tokens = _answer_tokens(n_papers, max_tokens)
-    return status_msgs, context, answer_tokens
+    return status_msgs, context, answer_tokens, notes_results, all_chunks
+
+
+# ── Divide and conquer ──────────────────────────────
+
+def _divide_conquer_answer(question: str, notes_results: list[dict],
+                           all_chunks: list[dict], history_text: str,
+                           answer_tokens: int) -> str:
+    """Answer each paper's context separately, then synthesize."""
+    # Group chunks by paper_id
+    chunks_by_paper = {}
+    for c in all_chunks:
+        pid = c.get("paper_id", "")
+        chunks_by_paper.setdefault(pid, []).append(c)
+
+    # Generate per-paper sub-answers
+    per_paper_answers = []
+    for nr in notes_results:
+        pid = nr["paper_id"]
+        title = nr.get("title", pid)
+        paper_chunks = chunks_by_paper.get(pid, [])
+        paper_context = _format_context([nr], "Paper", "note")
+        if paper_chunks:
+            paper_context += "\n\n---\n\n" + _format_context(paper_chunks, "Detail", "text")
+
+        sub_max_tokens = min(answer_tokens // max(len(notes_results), 1), 1024)
+        print(f"    [RAG] Divide: analyzing {title[:60]}...")
+        response = get_llm_client().chat.completions.create(
+            model=config.LIGHT_MODEL_ID,
+            messages=[{"role": "user", "content": safe_format(
+                prompts.DIVIDE_SUB_PROMPT, context=paper_context, question=question)}],
+            temperature=0.0,
+            max_tokens=sub_max_tokens,
+        )
+        tracker.add(response, "divide_sub_answer")
+        sub_answer = response.choices[0].message.content
+        per_paper_answers.append(f"## {title}\n{sub_answer}")
+
+    # Synthesize final answer
+    print(f"    [RAG] Synthesizing {len(per_paper_answers)} sub-answers...")
+    synthesis = "\n\n---\n\n".join(per_paper_answers)
+    prompt = safe_format(prompts.DIVIDE_SYNTHESIS_PROMPT,
+                         per_paper_answers=synthesis, question=question)
+    if history_text:
+        prompt = history_text + "\n" + prompt
+
+    response = get_llm_client().chat.completions.create(
+        model=config.LLM_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=config.RAG_QA_TEMPERATURE,
+        max_tokens=answer_tokens,
+        stream=False,
+    )
+    tracker.add(response, "divide_synthesis")
+    return response.choices[0].message.content
 
 
 # ── Public API ────────────────────────────────────────
 
 def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
         where: str = None, detail: str = None, max_tokens: int = None,
-        session_id: str = None) -> str:
+        session_id: str = None, divide_conquer: bool = False) -> str:
     """Adaptive RAG Q&A — returns complete answer string (CLI).
 
     If *session_id* is provided, loads the session for multi-turn context:
     rewrites the question to be self-contained, injects history into the
     answer prompt, and records the exchange after completion.
+
+    If *divide_conquer* is True and multiple papers are found, answers each
+    paper separately then synthesizes a final answer.
     """
     session = None
     rewritten_question = question
@@ -404,7 +549,7 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
             if search_query != rewritten_question:
                 print(f"    [RAG] Expanded: {search_query}")
 
-    status_msgs, context, answer_tokens = _gather_context(
+    status_msgs, context, answer_tokens, notes_results, all_chunks = _gather_context(
         rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
         search_query=search_query)
 
@@ -422,25 +567,26 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
         history_text = session_mod.build_history_for_prompt(session)
         if history_text:
             history_text = f"## Conversation history (for context)\n{history_text}\n"
-            # Truncate history if too long
             history_tokens = session_mod.estimate_tokens(history_text)
             if history_tokens > config.CONTEXT_HISTORY_MAX_TOKENS:
-                # Keep only recent portion
                 lines = history_text.split("\n")
-                keep = lines[-30:]  # rough: last ~30 lines
-                history_text = "\n".join(keep)
+                history_text = "\n".join(lines[-30:])
 
-    print("    [RAG] Generating answer...")
-    response = get_llm_client().chat.completions.create(
-        model=config.LLM_MODEL,
-        messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,
-            history=history_text, context=context, question=question)}],
-        temperature=config.RAG_QA_TEMPERATURE,
-        max_tokens=answer_tokens,
-        stream=False,
-    )
-    tracker.add(response, "qa_answer")
-    answer = response.choices[0].message.content
+    if divide_conquer and len(notes_results) > 1:
+        answer = _divide_conquer_answer(
+            question, notes_results, all_chunks, history_text, answer_tokens)
+    else:
+        print("    [RAG] Generating answer...")
+        response = get_llm_client().chat.completions.create(
+            model=config.LLM_MODEL,
+            messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,
+                history=history_text, context=context, question=question)}],
+            temperature=config.RAG_QA_TEMPERATURE,
+            max_tokens=answer_tokens,
+            stream=False,
+        )
+        tracker.add(response, "qa_answer")
+        answer = response.choices[0].message.content
 
     if session:
         session_mod.after_answer(question, rewritten_question, answer, session)
@@ -450,13 +596,16 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
 
 def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
                where: str = None, detail: str = None, max_tokens: int = None,
-               session_id: str = None):
+               session_id: str = None, divide_conquer: bool = False):
     """Streaming RAG Q&A — yields SSE-formatted progress events (Web).
 
     Runs _gather_context in a background thread so progress messages are
     yielded in real-time instead of buffered until completion.
 
     If *session_id* is provided, loads session for multi-turn context.
+
+    If *divide_conquer* is True and multiple papers are found, answers each
+    paper separately then streams the final synthesis.
     """
     session = None
     rewritten_question = question
@@ -475,12 +624,12 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
 
     def _run_gather():
         try:
-            msgs, ctx, tokens = _gather_context(
+            msgs, ctx, tokens, notes, chunks = _gather_context(
                 rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
                 progress=lambda msg: result_queue.put(("status", msg)),
                 search_query=search_query,
             )
-            result_queue.put(("__result__", (msgs, ctx, tokens)))
+            result_queue.put(("__result__", (msgs, ctx, tokens, notes, chunks)))
         except Exception as e:
             result_queue.put(("__error__", str(e)))
 
@@ -489,6 +638,8 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
 
     context = None
     answer_tokens = None
+    notes_results = []
+    all_chunks = []
 
     while True:
         try:
@@ -503,7 +654,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
             print(f"    [RAG] {msg}")
             yield emit_sse("status", message=msg)
         elif kind == "__result__":
-            _, (status_msgs, context, answer_tokens) = item
+            _, (status_msgs, context, answer_tokens, notes_results, all_chunks) = item
             break
         elif kind == "__error__":
             yield emit_sse("error", message=item[1])
@@ -529,6 +680,66 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
                 lines = history_text.split("\n")
                 history_text = "\n".join(lines[-30:])
 
+    if divide_conquer and len(notes_results) > 1:
+        # Divide-and-conquer: per-paper sub-answers, then stream synthesis
+        chunks_by_paper = {}
+        for c in all_chunks:
+            pid = c.get("paper_id", "")
+            chunks_by_paper.setdefault(pid, []).append(c)
+
+        per_paper_answers = []
+        for idx, nr in enumerate(notes_results):
+            pid = nr["paper_id"]
+            title = nr.get("title", pid)
+            paper_chunks = chunks_by_paper.get(pid, [])
+            paper_context = _format_context([nr], "Paper", "note")
+            if paper_chunks:
+                paper_context += "\n\n---\n\n" + _format_context(paper_chunks, "Detail", "text")
+
+            sub_max = min(answer_tokens // max(len(notes_results), 1), 1024)
+            msg = f"Divide: analyzing paper {idx + 1}/{len(notes_results)}: {title[:60]}..."
+            print(f"    [RAG] {msg}")
+            yield emit_sse("status", message=msg)
+
+            response = get_llm_client().chat.completions.create(
+                model=config.LIGHT_MODEL_ID,
+                messages=[{"role": "user", "content": safe_format(
+                    prompts.DIVIDE_SUB_PROMPT, context=paper_context, question=question)}],
+                temperature=0.0,
+                max_tokens=sub_max,
+            )
+            tracker.add(response, "divide_sub_answer")
+            per_paper_answers.append(f"## {title}\n{response.choices[0].message.content}")
+
+        synthesis = "\n\n---\n\n".join(per_paper_answers)
+        prompt = safe_format(prompts.DIVIDE_SYNTHESIS_PROMPT,
+                             per_paper_answers=synthesis, question=question)
+        if history_text:
+            prompt = history_text + "\n" + prompt
+
+        print(f"    [RAG] Synthesizing {len(per_paper_answers)} sub-answers...")
+        yield emit_sse("status", message=f"Synthesizing from {len(per_paper_answers)} papers...")
+
+        answer = ""
+        response = get_llm_client().chat.completions.create(
+            model=config.LLM_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=config.RAG_QA_TEMPERATURE,
+            max_tokens=answer_tokens,
+            stream=True,
+        )
+        for chunk in response:
+            if chunk.choices[0].delta.content:
+                answer += chunk.choices[0].delta.content
+                yield emit_sse("token", text=chunk.choices[0].delta.content)
+
+        if session:
+            session_mod.after_answer(question, rewritten_question, answer, session)
+
+        yield emit_sse("done", usage=tracker.summary())
+        return
+
+    # Normal (non-divide-conquer) streaming path
     print("    [RAG] Generating answer...")
     yield emit_sse("status", message="Generating answer...")
 

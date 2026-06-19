@@ -9,15 +9,15 @@ from ..prompt_store import get as _get_prompt
 
 # ── Defaults ───────────────────────────────────────────
 
-_DEFAULT_QA_PROMPT = """You are a research assistant. Answer the question based ONLY on the provided paper excerpts. Each excerpt has a source label in [brackets].
+_DEFAULT_QA_PROMPT = """You are a research assistant. Answer the question based ONLY on the provided paper excerpts. Each excerpt has a source label in [brackets] with the paper title and year.
 
 {history}
 
 Rules:
 - Answer in Chinese
-- Use [Paper: ...] excerpts for background and high-level understanding
-- Use [Detail: ...] excerpts for specific numbers, formulas, and implementation facts — prefer these for factual claims
-- Cite sources with format: 【Title (Year)】
+- Use [Paper | ...] excerpts (reading notes) for background and high-level understanding
+- Use [Detail | ...] excerpts (full-text chunks) for specific numbers, formulas, and implementation facts — prefer these for factual claims
+- Cite sources with format: 【Title (Year)】using the title and year from the source label
 - If comparing multiple papers, use a table when helpful
 - If the excerpts don't contain enough information to answer, say so explicitly: "当前知识库中的论文未涉及此问题的足够信息"
 - After your answer, add a "## Sources" section listing each paper you cited with its title and year
@@ -32,19 +32,21 @@ Question: {question}
 
 Answer:"""
 
-_DEFAULT_NEED_DETAILS_PROMPT = """You are evaluating how much additional technical detail is needed to answer a question.
+_DEFAULT_NEED_DETAILS_PROMPT = """You are evaluating how much additional technical detail is needed to answer a question. The user expects detailed, thorough answers with specific numbers, formulas, and implementation facts whenever the question asks about methods, results, or comparisons.
 
 Question: {question}
 
-Provided notes:
+Provided notes (summaries only — no formulas, no detailed numbers):
 ---
 {context}
 ---
 
-How much additional detail from the full paper text is needed?
-1 = notes are sufficient, no extra detail needed
-2 = need key details only (core formulas, main experimental numbers, critical implementation specifics)
-3 = need extensive detail (full methodology breakdown, all experiments, complete derivations)
+How much additional detail from the full paper text is needed to give a thorough answer?
+1 = notes are sufficient (only for very high-level overview questions with no technical specifics requested)
+2 = need key details (core formulas, main experimental numbers, critical implementation specifics) — DEFAULT for most technical questions
+3 = need extensive detail (full methodology breakdown, all experiments, complete derivations) — for survey/comparison/deep-analysis questions
+
+Unless the question is purely conceptual ("what is X?" without asking for specifics), default to level 2 or 3.
 
 Reply with ONLY one digit: 1, 2, or 3."""
 
@@ -59,7 +61,16 @@ Return a JSON object keyed by paper title, each value is an array of section hea
 
 JSON:"""
 
-# Combined rewrite + search-term extraction (replaces two separate LLM calls)
+# ── Query decomposition (multi-vector search) ─────
+_DEFAULT_QUERY_DECOMPOSE_PROMPT = """Given a research question, generate {n} semantic variants to improve retrieval recall. Vary phrasing, use different technical terms (synonyms, related concepts), and include both broad and specific formulations.
+
+Question: {question}
+
+Return JSON: {{"queries": ["variant 1", "variant 2", ...]}}
+
+JSON:"""
+
+# Combined rewrite + search-term extraction + query decomposition
 _DEFAULT_QUESTION_PREPROCESS_PROMPT = """Given conversation history and a new question:
 
 1. Rewrite the question to be self-contained (resolve pronouns like "it", "this", "they", "the paper").
@@ -110,6 +121,38 @@ History:
 
 Compact summary:"""
 
+_DEFAULT_DIVIDE_SUB_PROMPT = """You are analyzing a single paper to answer part of a larger question. Answer based ONLY on the provided excerpts.
+
+Question: {question}
+
+Paper excerpts:
+---
+{context}
+---
+
+Provide a focused answer covering what this specific paper contributes to answering the question. Answer in Chinese. Cite specific numbers and facts where available.
+
+Answer:"""
+
+_DEFAULT_DIVIDE_SYNTHESIS_PROMPT = """You are a research assistant synthesizing multiple sub-answers into a comprehensive final answer. Each sub-answer covers findings from a different paper.
+
+Rules:
+- Answer in Chinese
+- Synthesize the sub-answers into a coherent, well-structured response
+- Compare and contrast findings across papers — use a table when helpful
+- Cite sources with format: 【Title (Year)】
+- If sub-answers conflict, note the disagreement
+- After your answer, add a "## Sources" section listing each paper you cited
+
+Per-paper sub-answers:
+---
+{per_paper_answers}
+---
+
+Original question: {question}
+
+Synthesized answer:"""
+
 _DEFAULT_FILTER_PAPERS_PROMPT = """Given a question and a list of candidate papers, select which papers are relevant to answering the question.
 
 Question: {question}
@@ -127,27 +170,34 @@ QA_PROMPT = _get_prompt("qa_prompt", _DEFAULT_QA_PROMPT)
 NEED_DETAILS_PROMPT = _get_prompt("need_details_prompt", _DEFAULT_NEED_DETAILS_PROMPT)
 BATCH_SECTION_MATCH_PROMPT = _get_prompt("batch_section_match_prompt", _DEFAULT_BATCH_SECTION_MATCH_PROMPT)
 FILTER_PAPERS_PROMPT = _get_prompt("filter_papers_prompt", _DEFAULT_FILTER_PAPERS_PROMPT)
+QUERY_DECOMPOSE_PROMPT = _get_prompt("query_decompose_prompt", _DEFAULT_QUERY_DECOMPOSE_PROMPT)
 QUESTION_PREPROCESS_PROMPT = _get_prompt("question_preprocess_prompt", _DEFAULT_QUESTION_PREPROCESS_PROMPT)
 QUESTION_REWRITE_PROMPT = _get_prompt("question_rewrite_prompt", _DEFAULT_QUESTION_REWRITE_PROMPT)
 ROUND_SUMMARY_PROMPT = _get_prompt("round_summary_prompt", _DEFAULT_ROUND_SUMMARY_PROMPT)
 HISTORY_FULL_COMPACT_PROMPT = _get_prompt("history_full_compact_prompt", _DEFAULT_HISTORY_FULL_COMPACT_PROMPT)
+DIVIDE_SUB_PROMPT = _get_prompt("divide_sub_prompt", _DEFAULT_DIVIDE_SUB_PROMPT)
+DIVIDE_SYNTHESIS_PROMPT = _get_prompt("divide_synthesis_prompt", _DEFAULT_DIVIDE_SYNTHESIS_PROMPT)
 
 DEFAULTS = {
     "qa_prompt": _DEFAULT_QA_PROMPT,
     "need_details_prompt": _DEFAULT_NEED_DETAILS_PROMPT,
     "batch_section_match_prompt": _DEFAULT_BATCH_SECTION_MATCH_PROMPT,
     "filter_papers_prompt": _DEFAULT_FILTER_PAPERS_PROMPT,
+    "query_decompose_prompt": _DEFAULT_QUERY_DECOMPOSE_PROMPT,
     "question_preprocess_prompt": _DEFAULT_QUESTION_PREPROCESS_PROMPT,
     "question_rewrite_prompt": _DEFAULT_QUESTION_REWRITE_PROMPT,
     "round_summary_prompt": _DEFAULT_ROUND_SUMMARY_PROMPT,
     "history_full_compact_prompt": _DEFAULT_HISTORY_FULL_COMPACT_PROMPT,
+    "divide_sub_prompt": _DEFAULT_DIVIDE_SUB_PROMPT,
+    "divide_synthesis_prompt": _DEFAULT_DIVIDE_SYNTHESIS_PROMPT,
 }
 
 
 def reload() -> None:
     """Re-read prompt overrides from vault/prompts.json (no restart needed)."""
     global QA_PROMPT, NEED_DETAILS_PROMPT, BATCH_SECTION_MATCH_PROMPT, FILTER_PAPERS_PROMPT
-    global QUESTION_PREPROCESS_PROMPT, QUESTION_REWRITE_PROMPT, ROUND_SUMMARY_PROMPT, HISTORY_FULL_COMPACT_PROMPT
+    global QUERY_DECOMPOSE_PROMPT, QUESTION_PREPROCESS_PROMPT, QUESTION_REWRITE_PROMPT, ROUND_SUMMARY_PROMPT, HISTORY_FULL_COMPACT_PROMPT
+    global DIVIDE_SUB_PROMPT, DIVIDE_SYNTHESIS_PROMPT
     from ..prompt_store import _OVERRIDES, _OVERRIDE_PATH
     if _OVERRIDE_PATH and _OVERRIDE_PATH.exists():
         try:
@@ -161,7 +211,10 @@ def reload() -> None:
 
     BATCH_SECTION_MATCH_PROMPT = _get_prompt("batch_section_match_prompt", _DEFAULT_BATCH_SECTION_MATCH_PROMPT)
     FILTER_PAPERS_PROMPT = _get_prompt("filter_papers_prompt", _DEFAULT_FILTER_PAPERS_PROMPT)
+    QUERY_DECOMPOSE_PROMPT = _get_prompt("query_decompose_prompt", _DEFAULT_QUERY_DECOMPOSE_PROMPT)
     QUESTION_PREPROCESS_PROMPT = _get_prompt("question_preprocess_prompt", _DEFAULT_QUESTION_PREPROCESS_PROMPT)
     QUESTION_REWRITE_PROMPT = _get_prompt("question_rewrite_prompt", _DEFAULT_QUESTION_REWRITE_PROMPT)
     ROUND_SUMMARY_PROMPT = _get_prompt("round_summary_prompt", _DEFAULT_ROUND_SUMMARY_PROMPT)
     HISTORY_FULL_COMPACT_PROMPT = _get_prompt("history_full_compact_prompt", _DEFAULT_HISTORY_FULL_COMPACT_PROMPT)
+    DIVIDE_SUB_PROMPT = _get_prompt("divide_sub_prompt", _DEFAULT_DIVIDE_SUB_PROMPT)
+    DIVIDE_SYNTHESIS_PROMPT = _get_prompt("divide_synthesis_prompt", _DEFAULT_DIVIDE_SYNTHESIS_PROMPT)

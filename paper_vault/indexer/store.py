@@ -107,14 +107,18 @@ def rebuild_chunks_index(paper_id: str, chunks: list[dict], embeddings, meta: di
     table.add(rows)
 
 
-def search_chunks(query_vector, top_k: int = 5, where: str = None) -> list[dict]:
+def search_chunks(query_vector, top_k: int = 5, where: str = None,
+                  distance_threshold: float = None) -> list[dict]:
     db = _get_db()
     try:
         table = db.open_table(_CHUNKS_TABLE)
         q = table.search(query_vector.tolist()).limit(top_k)
         if where:
             q = q.where(where)
-        return q.to_list()
+        results = q.to_list()
+        if distance_threshold is not None:
+            results = [r for r in results if r.get("_distance", 0) <= distance_threshold]
+        return results
     except Exception:
         return []
 
@@ -122,8 +126,9 @@ def search_chunks(query_vector, top_k: int = 5, where: str = None) -> list[dict]
 def search_chunks_for_papers(query_vector, paper_ids: list[str],
                               per_paper: int = 3,
                               sections: list[str] = None,
-                              where: str = None) -> list[dict]:
-    """Search chunks limited to specific paper_ids. Optionally filter by sections and/or where clause."""
+                              where: str = None,
+                              distance_threshold: float = None) -> list[dict]:
+    """Search chunks limited to specific paper_ids. Optionally filter by sections, where clause, and/or distance threshold."""
     if not paper_ids:
         return []
     db = _get_db()
@@ -138,7 +143,10 @@ def search_chunks_for_papers(query_vector, paper_ids: list[str],
             conditions.append(where)
         where_clause = " AND ".join(conditions)
         q = table.search(query_vector.tolist()).where(where_clause).limit(len(paper_ids) * per_paper)
-        return q.to_list()
+        results = q.to_list()
+        if distance_threshold is not None:
+            results = [r for r in results if r.get("_distance", 0) <= distance_threshold]
+        return results
     except Exception:
         return []
 
@@ -168,14 +176,18 @@ def rebuild_notes_index(paper_id: str, note: str, note_embedding, meta: dict,
     table.add([row])
 
 
-def search_notes(query_vector, top_k: int = 3, where: str = None) -> list[dict]:
+def search_notes(query_vector, top_k: int = 3, where: str = None,
+                 distance_threshold: float = None) -> list[dict]:
     db = _get_db()
     try:
         table = db.open_table(_NOTES_TABLE)
         q = table.search(query_vector.tolist()).limit(top_k)
         if where:
             q = q.where(where)
-        return q.to_list()
+        results = q.to_list()
+        if distance_threshold is not None:
+            results = [r for r in results if r.get("_distance", 0) <= distance_threshold]
+        return results
     except Exception:
         return []
 

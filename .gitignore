@@ -14,3 +14,5 @@ test_marker.py
 *.pdf
 OPTIMIZATION_BACKLOG.md
 DESIGN.md
+benchmark/data/cache/*.json
+benchmark_report.json

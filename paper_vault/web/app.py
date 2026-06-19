@@ -797,14 +797,20 @@ async def search(query: str = Form(...), top_k: int = Form(10),
 async def ask_question(question: str = Form(...), n_papers: int = Form(5),
                        detail: str = Form("auto"), max_tokens: int = Form(None),
                        year_from: int = Form(None), year_to: int = Form(None),
-                       author: str = Form(None), session_id: str = Form(None)):
-    """RAG Q&A with streaming progress (SSE). Supports multi-turn via session_id."""
+                       author: str = Form(None), session_id: str = Form(None),
+                       divide_conquer: str = Form("0")):
+    """RAG Q&A with streaming progress (SSE). Supports multi-turn via session_id.
+
+    Set divide_conquer to "1" to answer each paper separately then synthesize
+    (better for multi-paper comparison questions).
+    """
     where = build_where_clause(year_from=year_from, year_to=year_to, author=author)
+    dc = divide_conquer == "1"
 
     async def _stream():
         for event in ask_stream(question, n_papers=n_papers, chunks_per_paper=None,
                                 where=where, detail=detail, max_tokens=max_tokens,
-                                session_id=session_id):
+                                session_id=session_id, divide_conquer=dc):
             yield event
 
     return StreamingResponse(_stream(), media_type="text/event-stream")

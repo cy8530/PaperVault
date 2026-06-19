@@ -420,7 +420,7 @@ function createTab(type, title, opts = {}) {
           <span>Detail:</span>
           <select id="session-detail-${id}" onchange="_updateDetailHint('${id}')">
             <option value="auto">Auto</option>
-            <option value="1">1 — Notes only</option>
+            <option value="1">1 — Notes + hints</option>
             <option value="2">2 — Moderate</option>
             <option value="3">3 — Extensive</option>
           </select>
@@ -430,6 +430,10 @@ function createTab(type, title, opts = {}) {
           <span>| Max tokens:</span>
           <input type="number" id="session-maxtok-${id}" value="" placeholder="Auto" min="256" max="32768" step="256"
             style="width:58px;background:var(--bg3);color:var(--fg);border:1px solid var(--border);border-radius:3px;padding:2px 4px;font-size:11px">
+          <label title="Answer each paper separately then synthesize — better for multi-paper comparison" style="cursor:help;display:flex;align-items:center;gap:3px;margin-left:4px">
+            <input type="checkbox" id="session-divide-${id}" style="accent-color:var(--accent)">
+            <span>Divide & Conquer</span>
+          </label>
           <span class="opt-hint" id="session-detail-hint-${id}">LLM judges depth automatically</span>
         </div>
         <div class="session-input-area">
@@ -1450,10 +1454,10 @@ function _renderSessionMessages(container, turns) {
 }
 
 const DETAIL_HINTS = {
-  auto: 'LLM judges depth automatically',
-  '1': 'Answer from notes only — fastest, cheapest',
-  '2': 'Retrieve ~1/8 chunks per paper — moderate detail',
-  '3': 'Retrieve ~1/3 chunks per paper — thorough',
+  auto: 'LLM judges depth automatically — favors detail for technical questions',
+  '1': 'Notes + minimal fact chunks — quick overview, grounded in key facts',
+  '2': 'Retrieve ~1/8 chunks per paper — moderate detail for method questions',
+  '3': 'Retrieve ~1/3 chunks per paper — thorough for deep analysis & surveys',
 };
 
 function _updateDetailHint(tabId) {
@@ -1497,14 +1501,17 @@ async function askInSession(sessionId, tabId) {
   const detailEl = document.getElementById('session-detail-' + tabId);
   const npEl = document.getElementById('session-npapers-' + tabId);
   const mtEl = document.getElementById('session-maxtok-' + tabId);
+  const dcEl = document.getElementById('session-divide-' + tabId);
   const detail = detailEl ? detailEl.value : 'auto';
   const nPapers = (npEl && npEl.value) ? npEl.value : '5';
   const maxTokens = (mtEl && mtEl.value) ? mtEl.value : '';
+  const divideConquer = dcEl ? (dcEl.checked ? '1' : '0') : '0';
   const form = new FormData();
   form.append('question', question);
   form.append('n_papers', nPapers);
   form.append('detail', detail);
   form.append('session_id', sessionId);
+  form.append('divide_conquer', divideConquer);
   if (maxTokens) form.append('max_tokens', maxTokens);
 
   let answerText = '';

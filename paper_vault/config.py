@@ -104,6 +104,9 @@ class Config:
     RAG_DETAIL_MODERATE_MIN = _get_int("rag_detail_moderate_min", "PAPER_VAULT_RAG_DETAIL_MODERATE_MIN", "5")
     RAG_DETAIL_EXTENSIVE_MIN = _get_int("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15")
     RAG_DEFAULT_CHUNK_COUNT = _get_int("rag_default_chunk_count", "PAPER_VAULT_RAG_DEFAULT_CHUNK_COUNT", "50")
+    RAG_SEARCH_DISTANCE_THRESHOLD = _get_float("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "2.0")
+    RAG_LEVEL1_MIN_CHUNKS = _get_int("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "3")
+    RAG_QUERY_VARIANTS = _get_int("rag_query_variants", "PAPER_VAULT_RAG_QUERY_VARIANTS", "3")
 
     # ── Session / Multi-turn ──────────────────────────
     SESSION_KEEP_FULL_ROUNDS = _get_int("session_keep_full_rounds", "PAPER_VAULT_SESSION_KEEP_FULL", "3")
@@ -160,6 +163,9 @@ class Config:
         cls.RAG_DETAIL_EXTENSIVE_DIVISOR = int(s("rag_detail_extensive_divisor", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_DIVISOR", "3"))
         cls.RAG_DETAIL_MODERATE_MIN = int(s("rag_detail_moderate_min", "PAPER_VAULT_RAG_DETAIL_MODERATE_MIN", "5"))
         cls.RAG_DETAIL_EXTENSIVE_MIN = int(s("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15"))
+        cls.RAG_SEARCH_DISTANCE_THRESHOLD = float(s("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "2.0"))
+        cls.RAG_LEVEL1_MIN_CHUNKS = int(s("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "3"))
+        cls.RAG_QUERY_VARIANTS = int(s("rag_query_variants", "PAPER_VAULT_RAG_QUERY_VARIANTS", "3"))
         cls.ANSWER_TOKENS_TIER_1 = int(s("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024"))
         cls.ANSWER_TOKENS_TIER_2 = int(s("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048"))
         cls.ANSWER_TOKENS_TIER_3 = int(s("answer_tokens_tier_3", "PAPER_VAULT_ANSWER_TOKENS_3", "3072"))
