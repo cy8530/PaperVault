@@ -153,6 +153,10 @@ python pv.py ask "因果推断综述" -d all --max-tokens 4096
 
 # 仅基于笔记回答（最快）
 python pv.py ask "简要总结" -d 1
+
+# 多轮对话
+python pv.py ask "这篇论文的主要贡献是什么？" --session <id>
+python pv.py ask "和已有工作相比如何？" --continue
 ```
 
 RAG 管道包含 **3 级自适应深度判断**：
@@ -170,7 +174,9 @@ LLM 自动判断问题类型，也可手动 `-d 1|2|3|all` 覆盖。
 - 左侧目录浏览所有论文，按需加载内容
 - 拖拽 PDF 上传，实时进度流
 - RAG 问答面板，流式输出
+- **多轮对话会话** — 聊天式界面，支持追问和历史回放，渐进式压缩
 - 设置页（⚙）可配置路径、模型、索引参数、RAG 参数
+- Tab 多面板 — 同时查看笔记和进行问答
 - KaTeX 公式渲染、代码高亮、暗色主题
 
 ### 🛠 其他 CLI 命令
@@ -182,6 +188,14 @@ python pv.py fix-metadata <paper_id>  # 重新提取元数据
 python pv.py fix-metadata --all       # 修复所有论文元数据
 python pv.py import --no-llm          # 仅提取文本，跳过 LLM
 python pv.py import --force           # 强制重新导入（覆盖已有内容哈希）
+
+# 多轮对话会话
+python pv.py session new              # 创建新会话
+python pv.py session list             # 列出所有会话
+python pv.py session show <id>        # 查看会话详情
+python pv.py session delete <id>      # 删除会话
+python pv.py ask "你的问题" --session <id>   # 在指定会话中提问
+python pv.py ask "追问" --continue           # 继续最近的会话
 ```
 
 ---
@@ -294,6 +308,7 @@ Web UI 的 Settings 页面保存的配置存储在 `vault/settings.json`。优�
 ./vault/
 ├── extracted/       # PDF 提取的原始文本缓存 (.md)
 ├── notes/           # LLM 生成的结构化阅读笔记 (.md)
+├── sessions/        # 多轮对话会话文件 (.json)
 ├── models/          # HuggingFace 嵌入模型缓存 (~500MB)
 ├── vectors/         # LanceDB 向量数据库
 └── settings.json    # Web UI 持久化配置
@@ -343,7 +358,7 @@ Web UI 的 Settings 页面保存的配置存储在 `vault/settings.json`。优�
 - [x] Web UI 取消/中断支持
 - [x] 双击启动脚本（macOS / Windows / Linux）
 - [ ] 论文关系图谱
-- [ ] 多轮对话 Session
+- [x] 多轮对话 Session
 - [ ] Token 预算控制
 
 ---

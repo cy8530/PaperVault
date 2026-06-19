@@ -11,9 +11,13 @@ from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from ..config import config, save_settings, _load_settings
-from ..indexer.store import get_indexed_paper_ids, get_indexed_hashes, build_where_clause, search_chunks, remove_paper, get_duplicate_paper_ids, remove_duplicate_rows
+from ..indexer.store import get_indexed_paper_ids, get_indexed_hashes, build_where_clause, search_chunks, remove_paper, get_duplicate_paper_ids, remove_duplicate_rows, update_paper_metadata, update_note_content, get_paper_info
 from ..indexer.embedder import embed_texts
 from ..rag.qa import ask_stream
+from ..rag.session import (
+    list_sessions, create_session, get_session, delete_session as delete_session_mod,
+    rename_session,
+)
 from ..usage import tracker
 from ..utils import emit_sse, normalize_id, sanitize_part
 from ..importer import import_one, import_pdfs, repair_orphan_notes
@@ -95,6 +99,7 @@ async def get_settings():
             "llm_model": config.LLM_MODEL,
             "light_model_id": config.LIGHT_MODEL_ID,
             "embedding_model": config.EMBEDDING_MODEL,
+            # API key is NOT exposed here — configure via .env file for security
         },
         "import_limits": {
             "max_pdf_mb": config.MAX_PDF_SIZE_MB,
@@ -150,32 +155,78 @@ async def update_settings(data: dict):
 
 # ── Prompts ──────────────────────────────────────────
 
+# Only these prompts are user-facing (affect output quality/style).
+# Internal pipeline prompts (judge, filter, section match, rewrite, compact) are
+# hidden — modifying them can silently break RAG behavior.
+_USER_PROMPT_KEYS = {"note_prompt", "qa_prompt"}
+
+
 @app.get("/api/prompts")
 async def get_prompts():
-    """Return all prompts with their defaults and current overrides."""
+    """Return user-facing prompts with their defaults and current overrides."""
     all_defaults = {**note_prompts.DEFAULTS, **rag_prompts.DEFAULTS}
     overrides = prompt_store._OVERRIDES if hasattr(prompt_store, '_OVERRIDES') else {}
-    current = dict(all_defaults)
-    current.update(overrides)
+    user_defaults = {k: v for k, v in all_defaults.items() if k in _USER_PROMPT_KEYS}
+    user_overrides = {k: v for k, v in overrides.items() if k in _USER_PROMPT_KEYS}
+    current = dict(user_defaults)
+    current.update(user_overrides)
     return {
         "prompts": current,
-        "defaults": all_defaults,
-        "overrides": overrides,
+        "defaults": user_defaults,
+        "overrides": user_overrides,
     }
 
 
 @app.post("/api/prompts")
 async def save_prompts(data: dict):
     """Save prompt overrides to vault/prompts.json and reload in-process."""
-    allowed_keys = set(note_prompts.DEFAULTS.keys()) | set(rag_prompts.DEFAULTS.keys())
-    overrides = {k: v for k, v in data.items() if k in allowed_keys and isinstance(v, str) and v.strip()}
-    # Remove keys set to empty/default by comparing against defaults
+    overrides = {k: v for k, v in data.items()
+                 if k in _USER_PROMPT_KEYS and isinstance(v, str) and v.strip()}
     all_defaults = {**note_prompts.DEFAULTS, **rag_prompts.DEFAULTS}
-    cleaned = {k: v for k, v in overrides.items() if v.strip() != all_defaults.get(k, "").strip()}
+    cleaned = {k: v for k, v in overrides.items()
+               if v.strip() != all_defaults.get(k, "").strip()}
     prompt_store.save(cleaned)
     note_prompts.reload()
     rag_prompts.reload()
     return {"ok": True, "saved": len(cleaned), "keys": list(cleaned.keys())}
+
+
+# ── Sessions ─────────────────────────────────────────
+
+@app.get("/api/sessions")
+async def api_list_sessions():
+    return list_sessions()
+
+
+@app.post("/api/sessions")
+async def api_create_session(data: dict = None):
+    name = (data or {}).get("name", "")
+    session = create_session(name=name)
+    return {"id": session.id, "name": session.name, "turns": len(session.turns)}
+
+
+@app.get("/api/sessions/{session_id}")
+async def api_get_session(session_id: str):
+    session = get_session(session_id)
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    from ..rag.session import _session_to_dict
+    return _session_to_dict(session)
+
+
+@app.delete("/api/sessions/{session_id}")
+async def api_delete_session(session_id: str):
+    if delete_session_mod(session_id):
+        return {"ok": True}
+    return JSONResponse({"error": "Session not found"}, status_code=404)
+
+
+@app.put("/api/sessions/{session_id}")
+async def api_rename_session(session_id: str, name: str = Form(...)):
+    """Rename a session."""
+    if rename_session(session_id, name):
+        return {"ok": True}
+    return JSONResponse({"error": "Session not found"}, status_code=404)
 
 
 # ── Directory browser ───────────────────────────────
@@ -318,6 +369,84 @@ async def get_note(paper_id: str, filename: str = ""):
                     "content": note_path.read_text(encoding="utf-8")}
 
     return JSONResponse({"error": "Note not found"}, status_code=404)
+
+
+@app.delete("/api/papers/{paper_id}")
+async def api_delete_paper(paper_id: str):
+    """Delete a paper from the index and clean up note + extracted files."""
+    # Get note_file before deleting
+    info = get_paper_info(paper_id)
+    note_file = info.get("note_file", "") if info else ""
+
+    remove_paper(paper_id)
+    _invalidate_note_map()
+
+    # Clean up files on disk
+    if note_file:
+        note_path = config.NOTES_DIR / note_file
+        if note_path.exists():
+            note_path.unlink()
+    extracted_path = config.EXTRACTED_DIR / f"{paper_id}.md"
+    if extracted_path.exists():
+        extracted_path.unlink()
+
+    return {"ok": True}
+
+
+@app.put("/api/papers/{paper_id}")
+async def api_rename_paper(paper_id: str, title: str = Form(...)):
+    """Update a paper's title."""
+    update_paper_metadata(paper_id, {"title": title})
+    return {"ok": True}
+
+
+@app.put("/api/papers/{paper_id}/note")
+async def api_save_note(paper_id: str, content: str = Form(...)):
+    """Save edited note content to disk and re-index in notes_index."""
+    info = get_paper_info(paper_id)
+    note_file = info.get("note_file", "") if info else ""
+    note_map, note_stems = _build_note_map()
+    if not note_file:
+        title = info.get("title", "") if info else ""
+        note_file = _find_note_file(paper_id, title, note_map, note_stems)
+    if not note_file:
+        return JSONResponse({"error": "Note file not found"}, status_code=404)
+
+    note_path = config.NOTES_DIR / note_file
+    try:
+        note_path.write_text(content, encoding="utf-8")
+        embedding = embed_texts([content])[0]
+        update_note_content(paper_id, content, embedding)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return {"ok": True, "note_file": note_file}
+
+
+@app.post("/api/papers/{paper_id}/reindex-note")
+async def api_reindex_note(paper_id: str):
+    """Re-embed the note file on disk and update notes_index vector."""
+    info = get_paper_info(paper_id)
+    note_file = info.get("note_file", "") if info else ""
+    note_map, note_stems = _build_note_map()
+    if not note_file:
+        title = info.get("title", "") if info else ""
+        note_file = _find_note_file(paper_id, title, note_map, note_stems)
+    if not note_file:
+        return JSONResponse({"error": "Note file not found"}, status_code=404)
+
+    note_path = config.NOTES_DIR / note_file
+    if not note_path.exists():
+        return JSONResponse({"error": "Note file missing on disk"}, status_code=404)
+
+    try:
+        content = note_path.read_text(encoding="utf-8")
+        embedding = embed_texts([content])[0]
+        update_note_content(paper_id, content, embedding)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+    return {"ok": True, "note_file": note_file}
 
 
 # ── Import ──────────────────────────────────────────
@@ -507,7 +636,7 @@ async def reindex_orphans():
 # ── Command executor ────────────────────────────────
 
 @app.post("/api/cmd")
-async def run_command(cmd: str = Form(...)):
+async def run_command(cmd: str = Form(...), session_id: str = Form(None)):
     """Execute a CLI-like command and stream output via SSE."""
     import shlex
 
@@ -623,7 +752,8 @@ async def run_command(cmd: str = Form(...)):
                     return
                 for event in ask_stream(query, n_papers=kwargs.get("n_papers", 5),
                                         detail=kwargs.get("detail", "auto"),
-                                        max_tokens=kwargs.get("max_tokens")):
+                                        max_tokens=kwargs.get("max_tokens"),
+                                        session_id=session_id):
                     yield event
 
             else:
@@ -667,13 +797,14 @@ async def search(query: str = Form(...), top_k: int = Form(10),
 async def ask_question(question: str = Form(...), n_papers: int = Form(5),
                        detail: str = Form("auto"), max_tokens: int = Form(None),
                        year_from: int = Form(None), year_to: int = Form(None),
-                       author: str = Form(None)):
-    """RAG Q&A with streaming progress (SSE)."""
+                       author: str = Form(None), session_id: str = Form(None)):
+    """RAG Q&A with streaming progress (SSE). Supports multi-turn via session_id."""
     where = build_where_clause(year_from=year_from, year_to=year_to, author=author)
 
     async def _stream():
         for event in ask_stream(question, n_papers=n_papers, chunks_per_paper=None,
-                                where=where, detail=detail, max_tokens=max_tokens):
+                                where=where, detail=detail, max_tokens=max_tokens,
+                                session_id=session_id):
             yield event
 
     return StreamingResponse(_stream(), media_type="text/event-stream")

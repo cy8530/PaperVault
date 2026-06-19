@@ -116,14 +116,14 @@
 **notes_index 补充字段：**
 - `sections` (string): JSON 数组，记录论文章节结构及 chunk 区间，如 `[{"heading": "3. Method", "chunk_start": 6, "chunk_end": 25}, ...]`。用于 RAG 章节定向检索。
 
-**`rebuild_index()` 逻辑：**
-1. 连接 `vault/vectors/` 下的 LanceDB
-2. 接收 `meta` dict（LLM 提取的元数据），写入每行
-3. 如表存在 → `DELETE WHERE paper_id = 'xxx'`（删旧数据）
-4. `ADD` 新 chunks
-5. 如表不存在 → `CREATE TABLE` + 写入
+**`rebuild_chunks_index()` / `rebuild_notes_index()` 逻辑：**
+- 连接 `vault/vectors/` 下的 LanceDB
+- 接收 `meta` dict（LLM 提取的元数据），写入每行
+- 如表存在 → `DELETE WHERE paper_id = 'xxx'`（删旧数据）
+- `ADD` 新行
+- 如表不存在 → `CREATE TABLE` + 写入
 
-**`search_similar()` 逻辑：**
+**`search_chunks()` 逻辑：**
 - `table.search(query_vector).where(where_clause).limit(top_k).to_list()`
 - `where` 子句支持 SQL：`year >= 2024`, `authors LIKE '%name%'`
 - LanceDB 默认 IVF-PQ 近似搜索，非暴力扫描
@@ -198,10 +198,10 @@ PDF → PyMuPDF → extracted/*.md → 取前 N 字符 → LLM 提取
 
 | 配置项 | 用途 | 特点 |
 |---|---|---|
-| `MODEL_ID` | Note 生成、RAG 回答 | 质量优先，全文推理 |
+| `LLM_MODEL` | Note 生成、RAG 回答 | 质量优先，全文推理 |
 | `LIGHT_MODEL_ID` | Metadata 提取、RAG Judge、章节匹配 | 速度优先，< 512 tokens 输出 |
 
-`LIGHT_MODEL_ID` 未设置时回退到 `MODEL_ID`。推荐轻量模型：`Qwen/Qwen2.5-7B-Instruct`（速度快，适合简单结构化任务）。
+环境变量为 `LLM_MODEL`（旧文档可能称为 `MODEL_ID`）。`LIGHT_MODEL_ID` 未设置时回退到 `LLM_MODEL`。推荐轻量模型：`Qwen/Qwen2.5-7B-Instruct`（速度快，适合简单结构化任务）。
 
 ### 5.8 章节结构映射
 
@@ -234,10 +234,10 @@ PDF → PyMuPDF → extracted/*.md → 取前 N 字符 → LLM 提取
 query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{paper_id, chunk_idx, text, title, year, ...}]
 ```
 
-**过滤条件构建：** `search_cmd.py` 根据 CLI 参数构建 SQL where 子句：
-- `--year-from 2024` → `year >= 2024`
-- `--year-to 2023` → `year <= 2023`
-- `--author "name"` → `authors LIKE '%name%'`
+**过滤条件构建：** `store.py::build_where_clause()` 根据参数构建 SQL where 子句：
+- `year_from=2024` → `year >= 2024`
+- `year_to=2023` → `year <= 2023`
+- `author="name"` → `authors LIKE '%name%'`
 - 多个条件 AND 连接
 
 **距离度量：** 点积（等价余弦相似度，因向量已 L2 归一化），`_distance` 越小越相关。
@@ -265,6 +265,11 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 | `ask_stream()` | Web SSE 流式 Q&A | yield SSE 事件 |
 
 两者均调用 `_gather_context()` 获取上下文，然后各自完成 LLM 调用。避免了原来 `_run_rag` 生成器中 `Streaming=False` 时靠 `StopIteration.value` 传回返回值的隐式行为。
+
+**多轮对话支持（2026-06 新增）：**
+- `ask()` / `ask_stream()` 接受可选 `session_id` 参数
+- 有 session 时：加载会话 → 用轻量 LLM 改写问题（解析代词、补充上下文）→ 将压缩后的历史注入 QA_PROMPT 的 `{history}` 占位符 → 回答完成后自动记录本轮对话
+- 历史注入前检查 token 预算（`CONTEXT_HISTORY_MAX_TOKENS`，默认 2000），超限时截断保留最后约 30 行
 
 **Embedding 复用：** 问题嵌入在 `_gather_context()` 开头执行一次，通过 `query_vec` 参数传递给 `_search_and_filter()` 和 chunk 检索循环，避免原来两次独立调用。
 
@@ -328,6 +333,43 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 - Notes 标注 `[Source: notes/{paper_id} | Paper: ...]`
 - Chunks 标注 `[Detail: {paper_id}/chunk_{idx} | Paper: ... | Section: ...]`
 
+**LLM 调用链路分析：**
+
+一次 RAG 问答（Web UI 多轮对话，detail=auto，level≥2）涉及以下调用：
+
+| # | 调用 | 类型 | 模型 | 耗时 | 触发条件 |
+|---|------|------|------|------|----------|
+| 1 | `_preprocess_question` 问题改写 + 搜索词扩展 | LLM API | 轻量 | 较短 | 有 session 时 |
+| 2 | `paper_filter` 论文相关性筛选 | LLM API | 轻量 | 较短 | 候选论文 > n_papers 时 |
+| 3 | `detail_judge` 深度判断 | LLM API | 轻量 | 中等 | detail=auto 时（默认） |
+| 4 | `section_match` 章节匹配 | LLM API | 轻量 | 中等 | level≥2 且非 full_text 时 |
+| 5 | `answer_generation` 答案生成 | LLM API | 主模型 | **较长** | 总是 |
+| 6 | `round_summary` 本轮摘要 | LLM API | 轻量 | 较短 | 有 session 时 |
+| 7 | `history_compact` 历史压缩 | LLM API | 轻量 | 中等 | 完整轮次 > SESSION_KEEP_FULL_ROUNDS 时（偶发） |
+| — | `embed_texts` 问题向量化 | 本地模型 | — | 很短 | 总是（CPU，零 API 费用） |
+| — | `search_notes` / `search_chunks` | 本地向量检索 | — | 很短 | 总是（LanceDB，零 API 费用） |
+
+其中 #3 和 #4 通过后台线程**并行执行**（#4 在 Stage 1 结束后立即启动，与 #3 的 LLM 调用同时进行），#4 的实际耗时被 #3 覆盖。LLM API 调用有效串行阶段为 5 个（#1 → #2 → #3∥#4 → #5 → #6）。
+
+**各场景调用数：**
+
+| 场景 | LLM API 调用数 | 跳过项 |
+|------|---------------|--------|
+| Web UI 多轮，detail=auto，level≥2 | 6（#7 偶发 +1） | — |
+| Web UI 多轮，detail=1（notes only） | 4 | 跳过 #4 |
+| CLI ask，无 session | 4 | 跳过 #1 #6 #7 |
+| 首轮对话，无历史 | 4 | 跳过 #1 #6 #7（#7 永不触发） |
+
+**调用类型说明：**
+
+| 类型 | 说明 | 费用 |
+|------|------|------|
+| LLM API | 通过 OpenAI 兼容 API 调用远程大语言模型，延迟取决于模型速度和网络 | 按 token 计费 |
+| 本地模型 | SentenceTransformer 在本地 CPU/GPU 运行 embedding，单次 ~100ms | 零 |
+| 本地向量检索 | LanceDB 嵌入式向量数据库，近似搜索 | 零 |
+
+**首 token 延迟瓶颈：** 用户发送问题后，需等待 #1 → #2 → #3∥#4 全部完成后，才开始 #5 的流式输出。其中 #3（detail_judge）因将全部 notes 文本送入 LLM（~2000 input tokens），是预处理阶段最重的单次调用。整个预处理阶段约贡献总延迟的 20-25%，#5 答案生成为 70-75%。
+
 **QA Prompt 优化：**
 - 区分 [Paper:]（背景理解）和 [Detail:]（事实依据）的权重
 - 对比类问题建议用表格
@@ -350,8 +392,77 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 - `sanitize_part()` — 文件名安全化处理（原 CLI 私有函数 `_sanitize_part`，提升为公共工具）
 - `normalize_id()` — paper_id 标准化（截断、去非法字符、去重下划线）
 - `emit_sse()` — SSE 事件格式化，CLI 和 Web 共用同一格式
+- `get_llm_client()` — 内置 `httpx.Timeout(120.0, connect=15.0)`，防止 API 不可达时无限挂起（之前默认 600s 无超时导致 RAG 在 "Searching papers" 阶段卡死）
 
-### 6.2 导入逻辑抽取（importer.py）
+### 6.2 多轮对话会话管理（session.py）
+
+**实现：** `paper_vault/rag/session.py`
+
+**为什么需要会话管理：**
+- 单轮 Q&A 无法处理追问（"那第二篇呢？"、"对比一下这两篇的方法"），LLM 缺少上下文无法解析代词
+- 多轮对话历史会持续膨胀，需要压缩机制控制上下文长度，避免超出 LLM 窗口或 token 预算
+
+**Turn/Session 数据结构：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `Turn.role` | str | "user" / "assistant" |
+| `Turn.question` | str | 用户原始问题 |
+| `Turn.rewritten_question` | str | 经 LLM 改写后的自包含问题 |
+| `Turn.answer` | str | LLM 回答（压缩后为空字符串） |
+| `Turn.summary` | str | 本轮对话 LLM 摘要（压缩后填充完整回答的摘要） |
+| `Turn.cited_papers` | list[str] | 引用的论文 ID |
+| `Turn.timestamp` | float | Unix 时间戳 |
+| `Session.id` | str | 时间戳字符串（`session_{int(time.time())}`） |
+| `Session.name` | str | 会话名称 |
+| `Session.created_at` | float | 创建时间（Unix 时间戳） |
+| `Session.updated_at` | float | 最后更新时间（Unix 时间戳） |
+| `Session.turns` | list[Turn] | 对话轮次列表 |
+| `Session.compact_count` | int | 已执行压缩的次数 |
+
+**三级渐进式压缩策略：**
+
+| 级别 | 触发条件 | 操作 | 说明 |
+|------|----------|------|------|
+| 1 — 滑动窗口 | 轮数 > `SESSION_KEEP_FULL_ROUNDS` | 保留最近 N 轮完整，更早轮次的 assistant 回答被压缩为 LLM 摘要 | 最轻量，大部分场景触发此级 |
+| 2 — 全量压缩 | Level 1 后 token 仍超预算 | 所有旧轮次合并为一段 LLM 摘要 | 中等压缩 |
+| 3 — 预算预检 | 压缩后 token 仍超 `CONTEXT_HISTORY_MAX_TOKENS` | 截断保留最后 ~30 行 | 硬截断，兜底保护 |
+
+**压缩判定逻辑（`_is_compacted`）：**
+- 检测模式：`role == 'assistant' and answer == '' and summary != ''`
+- 正常轮次：answer 和 summary 均有内容
+- 已压缩轮次：answer 清空，summary 填充 LLM 生成的摘要
+- 优点：自然区分压缩/未压缩轮次，无需额外标记字段或 magic string
+
+**问题改写 + 搜索词扩展（`_preprocess_question` in qa.py）：**
+- `qa.py` 使用 `_preprocess_question()` 合并改写 + 搜索词提取为单次 LLM 调用，替换旧版 `rewrite_question`
+- 将最近 6 轮对话（3 个 Q&A 对）上下文发给轻量 LLM
+- LLM 将代词（"它"、"第二篇"、"该方法"）解析为明确指代，同时提取 3-5 个搜索关键词
+- Prompt 模板：`QUESTION_PREPROCESS_PROMPT`
+- 改写失败时回退到原始问题
+- `session.py` 中 `rewrite_question` 为独立函数，仅用于 session 层面改写（非 RAG 管道内）
+
+**历史注入（`build_history_for_prompt`）：**
+- 格式化为三段：`## Earlier conversation (summarized)` → 已压缩旧轮次 → `## User` / `## Assistant` → 最近完整轮次
+- 注入前估算 token 数（`estimate_tokens = max(len(text) // 3, 1)`），超 `CONTEXT_HISTORY_MAX_TOKENS` 时截断
+
+**回答后处理（`after_answer`）：**
+- 对本轮 assistant 回答调用 LLM 生成 round summary（`ROUND_SUMMARY_PROMPT`）
+- 追加 user turn + assistant turn（含 summary）到 session
+- 触发 `_compress_to_summary()` 检查是否需要压缩
+- 持久化保存到 `vault/sessions/{session_id}.json`
+
+**持久化：** 每个 session 保存为独立 JSON 文件，CRUD 操作均为文件系统级别，不依赖数据库。
+
+**新增 Prompt 模板：**
+
+| Prompt | 用途 | 调用模型 |
+|--------|------|----------|
+| `QUESTION_REWRITE_PROMPT` | 将追问改写为自包含问题 | 轻量模型 |
+| `ROUND_SUMMARY_PROMPT` | 为单轮回答生成摘要 | 轻量模型 |
+| `HISTORY_FULL_COMPACT_PROMPT` | 将多轮历史合并为一段摘要 | 轻量模型 |
+
+### 6.3 导入逻辑抽取（importer.py）
 
 **实现：** `paper_vault/importer.py`
 
@@ -373,18 +484,24 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 ```
 pv.py import [paths] [--no-llm] [--no-index] [--force]
 pv.py search <query> [-k N] [--year-from] [--year-to] [--author]
-pv.py ask <question> [-n N] [-d auto|1|2|3|all] [--chunks N] [--max-tokens N] [--year-from] [--year-to] [--author]
-pv.py serve [--host] [-p PORT]
+pv.py ask <question> [-n N] [-d auto|1|2|3|all] [--chunks N] [--max-tokens N] [--year-from] [--year-to] [--author] [--session ID] [--continue]
+pv.py serve [--host] [-p PORT] [--no-open]
 pv.py list
 pv.py fix-metadata <paper_ids> [--all]
 pv.py remove <paper_id>
+pv.py session list
+pv.py session new [--name NAME]
+pv.py session delete <session_id>
+pv.py session show <session_id>
 ```
 
 - `--force`：强制重新导入已索引论文
 - `-n`/`--notes`：RAG 检索论文数（默认 5）
 - `--chunks`：每篇论文最大 chunk 数（默认 auto）
+- `--session`/`--continue`：指定会话 ID 或继续最近会话，启用多轮对话
 - `paths` 为空时自动扫描 `PAPER_VAULT_IMPORT_DIRS`
 - `fix-metadata`：纯 LLM 重新提取标题/作者/年份，原地更新 LanceDB 索引 + 同步重命名笔记文件，无需重新导入 PDF。指定 paper_id 或 `--all` 修复全部论文
+- `session` 子命令：管理多轮对话会话（list/new/delete/show）
 
 ## 8. Token 用量跟踪
 
@@ -409,8 +526,8 @@ pv.py remove <paper_id>
 |---|---|---|
 | `OPENAI_BASE_URL` | (必填) | API endpoint |
 | `OPENAI_API_KEY` | (必填) | API 密钥 |
-| `MODEL_ID` | (必填) | 主模型（笔记生成、RAG 回答） |
-| `LIGHT_MODEL_ID` | 同 MODEL_ID | 轻量模型（元数据提取、Judge、章节匹配） |
+| `LLM_MODEL` | (必填) | 主模型（笔记生成、RAG 回答） |
+| `LIGHT_MODEL_ID` | 同 LLM_MODEL | 轻量模型（元数据提取、Judge、章节匹配） |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-base` | 本地 Embedding 模型 |
 | `PAPER_VAULT_DIR` | `./vault` | 数据存储根目录 |
 | `PAPER_VAULT_IMPORT_DIRS` | (环境变量或 settings.json) | 默认导入路径（`:` 分隔） |
@@ -436,6 +553,8 @@ pv.py remove <paper_id>
 | `PAPER_VAULT_ANSWER_TOKENS_1` | 1024 | 单篇回答 token 预算 |
 | `PAPER_VAULT_ANSWER_TOKENS_2` | 2048 | 两篇回答 token 预算 |
 | `PAPER_VAULT_ANSWER_TOKENS_3` | 3072 | 三篇及以上回答 token 预算 |
+| `PAPER_VAULT_SESSION_KEEP_FULL` | 3 | 会话保留完整内容的最近轮数 |
+| `PAPER_VAULT_HISTORY_MAX_TOKENS` | 2000 | 注入 QA prompt 的历史 token 预算上限 |
 
 **Web 设置持久化：** 可编辑配置项通过 Web UI 设置页面修改后保存至 `vault/settings.json`，下次启动自动加载。环境变量优先级高于 settings.json。
 
@@ -481,17 +600,61 @@ python pv.py serve [--host 127.0.0.1] [-p 8080]
 | GET | `/` | 前端页面 |
 | GET | `/api/papers` | 已索引论文列表（仅元数据，不含内容） |
 | GET | `/api/notes/{id}` | 论文笔记内容（前端按需加载，支持 `?filename=` 直接查找） |
+| DELETE | `/api/papers/{paper_id}` | 删除论文（索引 + 笔记文件 + 提取文件） |
+| PUT | `/api/papers/{paper_id}` | 更新论文标题 |
+| PUT | `/api/papers/{paper_id}/note` | 保存笔记内容并重新 embedding |
+| POST | `/api/papers/{paper_id}/reindex-note` | 从磁盘重新读取笔记并重新 embedding |
 | POST | `/api/import` | 上传 PDF → 提取 + 笔记 + 索引（SSE 进度流，含上传大小限制） |
+| POST | `/api/import-scan` | 扫描配置的导入目录并导入全部 PDF（SSE 进度流） |
 | POST | `/api/search` | 语义搜索（按 paper_id 去重） |
-| POST | `/api/ask` | RAG 问答（SSE 流式） |
+| POST | `/api/ask` | RAG 问答（SSE 流式，支持 `session_id` 多轮对话） |
 | GET | `/api/settings` | 获取当前配置（只读项 + 可编辑项） |
 | POST | `/api/settings` | 保存可编辑配置到 `vault/settings.json` |
+| GET | `/api/sessions` | 列出所有会话（id, name, turns, created_at, updated_at, compact_count） |
+| POST | `/api/sessions` | 创建新会话（name 可选） |
+| GET | `/api/sessions/{id}` | 获取会话详情（含全部 turns） |
+| PUT | `/api/sessions/{id}` | 重命名会话 |
+| DELETE | `/api/sessions/{id}` | 删除指定会话 |
+| GET | `/api/browse` | 浏览目录（文件夹选择器用） |
+| POST | `/api/browse-native` | 打开操作系统原生文件夹选择器 |
+| GET | `/api/prompts` | 获取用户可编辑的 prompt 模板 |
+| POST | `/api/prompts` | 保存 prompt 覆盖到 `vault/prompts.json` |
+| POST | `/api/cmd` | 执行 CLI 风格命令（import/search/ask/list/fix-metadata/remove） |
+| POST | `/api/clean-duplicates` | 清理 LanceDB 中的重复论文条目 |
+| POST | `/api/reindex-orphans` | 重新索引磁盘上存在但不在 LanceDB 中的笔记文件 |
 
 **性能优化（2026-06）：**
 - `/api/papers` 不再支持 `include_content`，始终只返回元数据。前端点击论文时通过 `/api/notes/{id}?filename=...` 按需加载单篇内容，避免全量加载导致 OOM
 - `_build_note_map()` 增加模块级缓存，导入完成后自动失效
 - SSE 导入进度流包含 keepalive 注释，防止长连接超时
 - 所有业务逻辑直接调用 `paper_vault.*` 模块，零重复代码
+
+**Tab 多面板系统（2026-06 重构）：**
+- 原有的单一 `#view-area` 替换为 `#tab-container`（`#tab-bar` + `#tab-panels`）
+- 每个 tab 对应一个持久 DOM panel（`createElement` / `appendChild`），切换 tab 仅切换 CSS `.active` 类，从不重建 DOM
+- 核心函数：
+  - `createTab(type, title, opts)` — 创建 tab，笔记类按 paperId 去重（重复则切换到已有 tab），创建持久 panel 并填入内容
+  - `closeTab(id)` — 移除 panel DOM，切换到相邻 tab
+  - `switchTab(id)` — 仅切换 `.active` 类，无 DOM 重建
+  - `renderTabBar()` — 仅更新 tab 栏 UI
+- 设计动机：之前用 `innerHTML` 全文重建 `#view-area`，导致无法同时打开多篇笔记，也无法在 Q&A 等待时查看其他笔记。持久 panel 解决了这些问题，SSE 流式 token 可在后台 tab 正常接收
+
+**Prompt 暴露控制（2026-06）：**
+- Web 设置页面仅暴露用户关心的 2 个 prompt：`note_prompt`（笔记生成）和 `qa_prompt`（RAG 回答）
+- 内部 pipeline prompt 不暴露：过滤、判定、章节匹配、问题改写、摘要生成等 7 个 prompt 均为只读
+- 后端通过 `_USER_PROMPT_KEYS = {"note_prompt", "qa_prompt"}` 白名单控制 `/api/prompts` GET/POST
+
+**API 密钥安全：**
+- 设置页面不暴露 `LLM_API_KEY`，仅显示引导文字提示用户在 `.env` 中配置
+- `LLM_BASE_URL` 同样不通过 Web UI 暴露
+
+**会话聊天 UI（2026-06 新增）：**
+- 侧边栏 Session 下拉选择器 + 新建按钮 + 自动刷新轮次计数
+- 点击会话 → 打开 session 类型 tab，展示完整对话历史（聊天气泡样式：用户消息靠右蓝色，助理消息靠左深色，已压缩历史显示为灰色摘要）
+- 每个 session tab 底部有内联输入框（Ctrl+Enter 发送），支持在该 session 内连续追问
+- 侧边栏 Q&A 面板提问时，若当前有活跃 session tab，自动追加到聊天窗口而非新建 QA tab
+- Command 输入框 ask 命令同样自动路由到活跃 session tab
+- Tab 关闭时自动清除 session 选中状态，切换 session tab 时同步选择器
 
 **设置页面（2026-06 新增）：**
 - 侧边栏标题旁 ⚙ 按钮进入设置界面
@@ -511,4 +674,4 @@ python pv.py serve [--host 127.0.0.1] [-p 8080]
 
 ---
 
-*最后更新：2026-06-11（纯 LLM 元数据提取重构、内容哈希去重、魔法数字集中管理、Web 设置页面含 Browse 文件夹选择器、模型可编辑、参数描述说明、null-safe 配置加载）*
+*最后更新：2026-06-16（LLM 调用链路分析、#1+#2 合并/并行 #4、context 去重、空检索兜底、多轮语义扩展、笔记编辑与 reindex、Web UI settings toggle/detail 选择器/参数自定义输入）*

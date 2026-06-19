@@ -105,6 +105,10 @@ class Config:
     RAG_DETAIL_EXTENSIVE_MIN = _get_int("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15")
     RAG_DEFAULT_CHUNK_COUNT = _get_int("rag_default_chunk_count", "PAPER_VAULT_RAG_DEFAULT_CHUNK_COUNT", "50")
 
+    # ── Session / Multi-turn ──────────────────────────
+    SESSION_KEEP_FULL_ROUNDS = _get_int("session_keep_full_rounds", "PAPER_VAULT_SESSION_KEEP_FULL", "3")
+    CONTEXT_HISTORY_MAX_TOKENS = _get_int("context_history_max_tokens", "PAPER_VAULT_HISTORY_MAX_TOKENS", "2000")
+
     # ── Answer token budget tiers ───────────────────────
     ANSWER_TOKENS_TIER_1 = _get_int("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024")
     ANSWER_TOKENS_TIER_2 = _get_int("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048")
@@ -159,6 +163,8 @@ class Config:
         cls.ANSWER_TOKENS_TIER_1 = int(s("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024"))
         cls.ANSWER_TOKENS_TIER_2 = int(s("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048"))
         cls.ANSWER_TOKENS_TIER_3 = int(s("answer_tokens_tier_3", "PAPER_VAULT_ANSWER_TOKENS_3", "3072"))
+        cls.SESSION_KEEP_FULL_ROUNDS = int(s("session_keep_full_rounds", "PAPER_VAULT_SESSION_KEEP_FULL", "3"))
+        cls.CONTEXT_HISTORY_MAX_TOKENS = int(s("context_history_max_tokens", "PAPER_VAULT_HISTORY_MAX_TOKENS", "2000"))
 
 
 config = Config()

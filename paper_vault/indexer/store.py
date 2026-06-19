@@ -224,6 +224,25 @@ def get_paper_meta(paper_id: str) -> dict | None:
         return None
 
 
+def update_note_content(paper_id: str, note_text: str, note_embedding):
+    """Update the note text and its embedding vector in notes_index.
+
+    Uses delete + add (same pattern as rebuild_notes_index) because LanceDB
+    update() does not reliably support list-type columns.
+    """
+    db = _get_db()
+    where = f"paper_id = {_quote_id(paper_id)}"
+    table = db.open_table(_NOTES_TABLE)
+    rows = table.to_arrow().to_pylist()
+    row = next((r for r in rows if r["paper_id"] == paper_id), None)
+    if not row:
+        raise LookupError(f"Paper {paper_id} not found in notes_index")
+    row["note"] = note_text
+    row["vector"] = note_embedding.tolist()
+    table.delete(where)
+    table.add([row])
+
+
 def update_paper_metadata(paper_id: str, meta: dict, note_file: str = ""):
     """Update metadata (title, authors, year, keywords, note_file) in both tables."""
     title = meta.get("title", "")
@@ -242,6 +261,20 @@ def update_paper_metadata(paper_id: str, meta: dict, note_file: str = ""):
             table.update(where=where, values=values)
         except Exception:
             pass
+
+
+def get_paper_info(paper_id: str) -> dict | None:
+    """Get metadata for a paper from the notes index."""
+    db = _get_db()
+    try:
+        table = db.open_table(_NOTES_TABLE)
+        rows = table.to_arrow().to_pylist()
+        for r in rows:
+            if r.get("paper_id") == paper_id:
+                return r
+    except Exception:
+        pass
+    return None
 
 
 def remove_paper(paper_id: str):

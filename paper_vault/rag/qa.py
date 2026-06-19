@@ -3,6 +3,7 @@
 import json
 import math
 import queue
+import re
 import threading
 
 from ..config import config
@@ -11,9 +12,105 @@ from ..indexer.store import search_notes, search_chunks_for_papers
 from ..usage import tracker
 from ..utils import get_llm_client, safe_format, parse_llm_json, emit_sse
 from . import prompts
+from . import session as session_mod
 
 
-# ── Context builders ──────────────────────────────────
+# ── Text normalization ─────────────────────────────────
+
+def _normalize_text(text: str) -> str:
+    """Collapse whitespace for comparison."""
+    return re.sub(r'\s+', ' ', text).strip().lower()
+
+
+def _word_overlap(a: str, b: str) -> float:
+    """Fraction of shorter text's words that appear in longer text."""
+    wa = set(a.split())
+    wb = set(b.split())
+    if not wa or not wb:
+        return 0.0
+    smaller = wa if len(wa) < len(wb) else wb
+    return len(smaller & (wb if smaller is wa else wa)) / len(smaller)
+
+
+# ── Context deduplication ──────────────────────────────
+
+def _deduplicate_items(items: list[dict], text_key: str) -> list[dict]:
+    """Remove items whose text is substantially contained in another item.
+
+    Uses substring containment and word-overlap ratio (>85%) to detect
+    near-duplicates.  Keeps the longer / richer item when a duplicate is found.
+    """
+    if len(items) <= 1:
+        return items
+
+    texts = [_normalize_text(item[text_key]) for item in items]
+    keep = []
+    for i, item in enumerate(items):
+        is_dup = False
+        for j in range(len(items)):
+            if i == j:
+                continue
+            ti, tj = texts[i], texts[j]
+            # Substring containment — shorter inside longer
+            if len(ti) < len(tj) and ti in tj:
+                is_dup = True
+                break
+            # High word overlap
+            if len(ti) > 40 and len(tj) > 40 and _word_overlap(ti, tj) > 0.85:
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(item)
+    return keep
+
+
+# ── Query expansion ────────────────────────────────────
+
+def _preprocess_question(question: str, session) -> tuple[str, str]:
+    """Rewrite + expand question in a single LLM call.
+
+    Merges what were previously two serial calls:
+      1. Question rewriting (de-reference pronouns, add context)
+      2. Query expansion (extract key terms for better search recall)
+
+    Returns (rewritten_question, search_query).  The search_query is only
+    used for embedding / vector search, never shown to the final-answer LLM.
+    """
+    if not session or not session.turns:
+        return question, question
+
+    # Build compact context from last 6 turns
+    context = ""
+    for t in session.turns[-6:]:
+        if t.role == "user":
+            context += f"Q: {t.question}\n"
+        elif t.role == "assistant" and t.summary:
+            context += f"A: {t.summary}\n"
+
+    if not context.strip():
+        return question, question
+
+    prompt = safe_format(prompts.QUESTION_PREPROCESS_PROMPT,
+                         history=context, question=question)
+    try:
+        response = get_llm_client().chat.completions.create(
+            model=config.LIGHT_MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=256,
+        )
+        tracker.add(response, "question_preprocess")
+        raw = response.choices[0].message.content.strip()
+        result = parse_llm_json(raw)
+        if isinstance(result, dict):
+            rewritten = result.get("rewritten", question) or question
+            terms = result.get("search_terms", "")
+            search_query = f"{rewritten}  [context: {terms}]" if terms else rewritten
+            return rewritten, search_query
+    except Exception:
+        pass
+
+    return question, question
 
 def _format_context(items: list[dict], prefix: str, text_key: str) -> str:
     def _sort_key(item):
@@ -53,8 +150,12 @@ def _call_light_llm(prompt: str, label: str, max_tokens: int = None) -> str:
 # ── Pipeline steps ────────────────────────────────────
 
 def _search_and_filter(question: str, n_papers: int, where: str | None,
-                       query_vec=None) -> list[dict]:
+                       query_vec=None, progress=None) -> list[dict]:
     """Stage 1: Broad semantic search + LLM relevance filter."""
+    def _emit(msg):
+        if progress:
+            progress(msg)
+
     if query_vec is None:
         query_vec = embed_texts([question], is_query=True)[0]
 
@@ -65,6 +166,7 @@ def _search_and_filter(question: str, n_papers: int, where: str | None,
     if len(broad_results) <= n_papers:
         return broad_results
 
+    _emit(f"Filtering {len(broad_results)} candidates → {n_papers}...")
     titles = [f"{i}. {nr.get('title') or nr['paper_id']}" for i, nr in enumerate(broad_results, 1)]
     raw = _call_light_llm(
         safe_format(prompts.FILTER_PAPERS_PROMPT, question=question, papers="\n".join(titles)),
@@ -158,10 +260,15 @@ def _answer_tokens(n_papers: int, max_tokens: int | None) -> int:
 def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
                     where: str | None, detail: str | None,
                     max_tokens: int | None,
-                    progress=None) -> tuple[list[str], str | None, int]:
+                    progress=None,
+                    search_query: str = None) -> tuple[list[str], str | None, int]:
     """Stages 1-3: search, filter, determine detail, retrieve context.
 
     Embeds the question once and reuses the vector across stages.
+
+    If *search_query* is given, it is used for embedding / vector search
+    instead of *question*.  This lets callers inject expanded query terms
+    without affecting the answer prompt.
 
     If ``progress`` is callable, it's invoked as ``progress(msg)`` for each
     status update so callers can stream intermediate progress.
@@ -175,20 +282,38 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
             progress(msg)
 
     status_msgs = []
+    search_text = search_query or question
     emit("Embedding question...")
-    q_embedding = embed_texts([question], is_query=True)
+    q_embedding = embed_texts([search_text], is_query=True)
     query_vec = q_embedding[0]
 
     # Stage 1: Search + filter
     emit("Searching papers...")
-    notes_results = _search_and_filter(question, n_papers, where, query_vec=query_vec)
+    notes_results = _search_and_filter(question, n_papers, where, query_vec=query_vec, progress=emit)
     if not notes_results:
         return status_msgs, None, 0
 
     selected_count = len(notes_results)
     emit(f"Found {selected_count} relevant papers")
 
-    # Stage 2: Determine detail level
+    # Kick off section matching in background while detail judge runs (parallel)
+    section_match_result = {}
+    section_match_done = threading.Event()
+    section_match_error = None
+
+    def _run_section_match():
+        nonlocal section_match_result, section_match_error
+        try:
+            section_match_result = _match_sections_batch(question, notes_results)
+        except Exception as e:
+            section_match_error = e
+        finally:
+            section_match_done.set()
+
+    section_thread = threading.Thread(target=_run_section_match, daemon=True)
+    section_thread.start()
+
+    # Stage 2: Determine detail level (runs in parallel with section matching)
     if detail and detail != "auto" and detail != "all":
         detail_level = int(detail)
         full_text = False
@@ -198,9 +323,19 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
 
     # Stage 3: Retrieve context
     if detail_level == 1 and not full_text:
-        context = _format_context(notes_results, "Source: notes", "note")
+        # No sections needed — skip waiting for section thread
+        notes_dedup = _deduplicate_items(notes_results, "note")
+        context = _format_context(notes_dedup, "Source: notes", "note")
+        if len(notes_dedup) < len(notes_results):
+            emit(f"Dedup: {len(notes_results) - len(notes_dedup)} note items merged")
         emit("Route: notes only")
     else:
+        # Need sections — wait for background thread (already running or done)
+        if not full_text:
+            section_match_done.wait()
+            if section_match_error:
+                emit(f"Section match failed: {section_match_error}")
+
         max_cc = max(nr.get("chunk_count", config.RAG_DEFAULT_CHUNK_COUNT) for nr in notes_results)
         if full_text:
             per_paper = max_cc
@@ -212,7 +347,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
             per_paper = max(config.RAG_DETAIL_EXTENSIVE_MIN, math.ceil(max_cc / config.RAG_DETAIL_EXTENSIVE_DIVISOR))
 
         emit(f"Retrieving chunks ({per_paper}/paper)...")
-        section_matches = _match_sections_batch(question, notes_results) if not full_text else {}
+        section_matches = section_match_result if not full_text else {}
 
         all_chunks = []
         for nr in notes_results:
@@ -230,6 +365,13 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
         route = f"Context ready: {len(all_chunks)} chunks [{level_label}]"
         if section_matches:
             route += ", section-targeted"
+
+        # Deduplicate chunks (adjacent chunks may overlap due to chunk_overlap)
+        chunks_before = len(all_chunks)
+        all_chunks = _deduplicate_items(all_chunks, "text")
+        if len(all_chunks) < chunks_before:
+            route += f", dedup: {chunks_before} → {len(all_chunks)}"
+
         emit(route)
         context = (_format_context(notes_results, "Source: notes", "note")
                    + "\n\n---\n\n" + _format_context(all_chunks, "Detail", "text"))
@@ -241,44 +383,102 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
 # ── Public API ────────────────────────────────────────
 
 def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
-        where: str = None, detail: str = None, max_tokens: int = None) -> str:
-    """Adaptive RAG Q&A — returns complete answer string (CLI)."""
+        where: str = None, detail: str = None, max_tokens: int = None,
+        session_id: str = None) -> str:
+    """Adaptive RAG Q&A — returns complete answer string (CLI).
+
+    If *session_id* is provided, loads the session for multi-turn context:
+    rewrites the question to be self-contained, injects history into the
+    answer prompt, and records the exchange after completion.
+    """
+    session = None
+    rewritten_question = question
+    search_query = question
+
+    if session_id:
+        session = session_mod.get_session(session_id)
+        if session:
+            rewritten_question, search_query = _preprocess_question(question, session)
+            if rewritten_question != question:
+                print(f"    [RAG] Rewritten: {rewritten_question}")
+            if search_query != rewritten_question:
+                print(f"    [RAG] Expanded: {search_query}")
+
     status_msgs, context, answer_tokens = _gather_context(
-        question, n_papers, chunks_per_paper, where, detail, max_tokens)
+        rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
+        search_query=search_query)
 
     for msg in status_msgs:
         print(f"    [RAG] {msg}")
 
     if context is None:
-        return "No relevant papers found to answer this question."
+        return ("No relevant papers found in your library for this question. "
+                "Suggestions: try broader search terms, reduce year/author filters, "
+                "or import more papers on this topic.")
+
+    # Build history section
+    history_text = ""
+    if session:
+        history_text = session_mod.build_history_for_prompt(session)
+        if history_text:
+            history_text = f"## Conversation history (for context)\n{history_text}\n"
+            # Truncate history if too long
+            history_tokens = session_mod.estimate_tokens(history_text)
+            if history_tokens > config.CONTEXT_HISTORY_MAX_TOKENS:
+                # Keep only recent portion
+                lines = history_text.split("\n")
+                keep = lines[-30:]  # rough: last ~30 lines
+                history_text = "\n".join(keep)
 
     print("    [RAG] Generating answer...")
     response = get_llm_client().chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,
-            context=context, question=question)}],
+            history=history_text, context=context, question=question)}],
         temperature=config.RAG_QA_TEMPERATURE,
         max_tokens=answer_tokens,
         stream=False,
     )
     tracker.add(response, "qa_answer")
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content
+
+    if session:
+        session_mod.after_answer(question, rewritten_question, answer, session)
+
+    return answer
 
 
 def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
-               where: str = None, detail: str = None, max_tokens: int = None):
+               where: str = None, detail: str = None, max_tokens: int = None,
+               session_id: str = None):
     """Streaming RAG Q&A — yields SSE-formatted progress events (Web).
 
     Runs _gather_context in a background thread so progress messages are
     yielded in real-time instead of buffered until completion.
+
+    If *session_id* is provided, loads session for multi-turn context.
     """
+    session = None
+    rewritten_question = question
+    search_query = question
+
+    if session_id:
+        session = session_mod.get_session(session_id)
+        if session:
+            rewritten_question, search_query = _preprocess_question(question, session)
+            if rewritten_question != question:
+                yield emit_sse("status", message=f"Rewritten: {rewritten_question}")
+            if search_query != rewritten_question:
+                yield emit_sse("status", message=f"Expanded: {search_query}")
+
     result_queue = queue.Queue()
 
     def _run_gather():
         try:
             msgs, ctx, tokens = _gather_context(
-                question, n_papers, chunks_per_paper, where, detail, max_tokens,
+                rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
                 progress=lambda msg: result_queue.put(("status", msg)),
+                search_query=search_query,
             )
             result_queue.put(("__result__", (msgs, ctx, tokens)))
         except Exception as e:
@@ -312,21 +512,41 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
     thread.join()
 
     if context is None:
-        yield emit_sse("done", answer="No relevant papers found to answer this question.")
+        yield emit_sse("done", answer=(
+            "No relevant papers found in your library for this question. "
+            "Suggestions: try broader search terms, reduce year/author filters, "
+            "or import more papers on this topic."))
         return
+
+    # Build history section
+    history_text = ""
+    if session:
+        history_text = session_mod.build_history_for_prompt(session)
+        if history_text:
+            history_text = f"## Conversation history (for context)\n{history_text}\n"
+            history_tokens = session_mod.estimate_tokens(history_text)
+            if history_tokens > config.CONTEXT_HISTORY_MAX_TOKENS:
+                lines = history_text.split("\n")
+                history_text = "\n".join(lines[-30:])
 
     print("    [RAG] Generating answer...")
     yield emit_sse("status", message="Generating answer...")
 
+    answer = ""
     response = get_llm_client().chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,
-            context=context, question=question)}],
+            history=history_text, context=context, question=question)}],
         temperature=config.RAG_QA_TEMPERATURE,
         max_tokens=answer_tokens,
         stream=True,
     )
     for chunk in response:
         if chunk.choices[0].delta.content:
+            answer += chunk.choices[0].delta.content
             yield emit_sse("token", text=chunk.choices[0].delta.content)
+
+    if session:
+        session_mod.after_answer(question, rewritten_question, answer, session)
+
     yield emit_sse("done", usage=tracker.summary())

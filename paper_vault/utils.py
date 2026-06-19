@@ -3,6 +3,7 @@
 import json
 import re
 
+import httpx
 from openai import OpenAI
 from .config import config
 
@@ -10,6 +11,10 @@ from .config import config
 # ── LLM client ───────────────────────────────────────
 
 _LLM_CLIENT = None
+
+# Total timeout 120s, connect timeout 15s — prevents indefinite hangs
+# when the API endpoint is unreachable or unresponsive.
+_CLIENT_TIMEOUT = httpx.Timeout(120.0, connect=15.0)
 
 
 def get_llm_client() -> OpenAI:
@@ -19,6 +24,7 @@ def get_llm_client() -> OpenAI:
         _LLM_CLIENT = OpenAI(
             base_url=config.LLM_BASE_URL,
             api_key=config.LLM_API_KEY,
+            timeout=_CLIENT_TIMEOUT,
         )
     return _LLM_CLIENT
 

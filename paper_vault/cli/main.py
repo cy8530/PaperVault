@@ -4,6 +4,7 @@ from .search_cmd import search
 from .ask_cmd import ask_question
 from .fix_cmd import fix_metadata
 from ..indexer.store import get_indexed_paper_ids, remove_paper
+from ..rag.session import list_sessions, create_session, delete_session, get_session
 
 
 def main():
@@ -41,6 +42,20 @@ def main():
     ask_parser.add_argument("--year-from", type=int, help="Filter: papers from this year")
     ask_parser.add_argument("--year-to", type=int, help="Filter: papers up to this year")
     ask_parser.add_argument("--author", type=str, help="Filter: papers by this author")
+    ask_parser.add_argument("--session", type=str, help="Session ID for multi-turn conversation")
+    ask_parser.add_argument("--continue", dest="continue_session", type=str,
+                            help="Continue an existing session (alias for --session)")
+
+    # session
+    session_parser = subparsers.add_parser("session", help="Manage conversation sessions")
+    session_sub = session_parser.add_subparsers(dest="session_cmd", required=True)
+    session_sub.add_parser("list", help="List all sessions")
+    session_new = session_sub.add_parser("new", help="Create a new session")
+    session_new.add_argument("--name", type=str, default="", help="Session name")
+    session_delete = session_sub.add_parser("delete", help="Delete a session")
+    session_delete.add_argument("session_id", help="Session ID to delete")
+    session_show = session_sub.add_parser("show", help="Show session details")
+    session_show.add_argument("session_id", help="Session ID to show")
 
     # serve
     serve_parser = subparsers.add_parser("serve", help="Start the web UI")
@@ -69,9 +84,11 @@ def main():
         search(args.query, top_k=args.k,
                year_from=args.year_from, year_to=args.year_to, author=args.author)
     elif args.command == "ask":
+        session_id = args.session or getattr(args, "continue_session", None)
         ask_question(args.question, n_papers=args.notes, chunks_per_paper=args.chunks,
                      detail=args.detail, max_tokens=args.max_tokens,
-                     year_from=args.year_from, year_to=args.year_to, author=args.author)
+                     year_from=args.year_from, year_to=args.year_to, author=args.author,
+                     session_id=session_id)
     elif args.command == "serve":
         import uvicorn
         import webbrowser
@@ -108,3 +125,36 @@ def main():
             print(f"Removed: {args.paper_id}")
         else:
             print(f"Paper not found: {args.paper_id}")
+    elif args.command == "session":
+        if args.session_cmd == "list":
+            sessions = list_sessions()
+            if not sessions:
+                print("No sessions.")
+            else:
+                print(f"Sessions ({len(sessions)}):")
+                for s in sessions:
+                    name = s["name"] or "(unnamed)"
+                    print(f"  {s['id']}  {name}  ({s['turns']} turns, {s['compact_count']} compactions)")
+        elif args.session_cmd == "new":
+            s = create_session(name=args.name)
+            print(f"Created session: {s.id}")
+        elif args.session_cmd == "delete":
+            if delete_session(args.session_id):
+                print(f"Deleted: {args.session_id}")
+            else:
+                print(f"Session not found: {args.session_id}")
+        elif args.session_cmd == "show":
+            s = get_session(args.session_id)
+            if s:
+                print(f"Session: {s.id}")
+                print(f"  Name: {s.name or '(unnamed)'}")
+                print(f"  Turns: {len(s.turns)}")
+                print(f"  Compactions: {s.compact_count}")
+                for i, t in enumerate(s.turns):
+                    if t.role == "user":
+                        q = t.rewritten_question or t.question
+                        print(f"  [{i}] Q: {q[:100]}")
+                    else:
+                        print(f"  [{i}] A: {t.summary[:100]}")
+            else:
+                print(f"Session not found: {args.session_id}")

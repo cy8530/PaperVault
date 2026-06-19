@@ -7,7 +7,6 @@ test_notes/
 *.pyc
 .DS_Store
 .idea/
-extracted/
 vault/
 papers/
 test_marker.py

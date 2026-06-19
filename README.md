@@ -154,6 +154,10 @@ python pv.py ask "Survey of causal inference methods" -d all --max-tokens 4096
 
 # Notes-only (fastest)
 python pv.py ask "Give me a brief summary" -d 1
+
+# Multi-turn conversation
+python pv.py ask "What is the main contribution?" --session <id>
+python pv.py ask "How does it compare to prior work?" --continue
 ```
 
 The RAG pipeline includes **3-level adaptive depth judgment**:
@@ -171,7 +175,9 @@ The LLM auto-determines the question type; you can also override with `-d 1|2|3|
 - Browse all papers in the sidebar, load content on demand
 - Drag-and-drop PDF upload with real-time progress streaming
 - RAG Q&A panel with streaming output
+- **Multi-turn conversation sessions** — chat-like interface with history, follow-up questions, progressive compaction
 - Settings page (⚙) for paths, models, indexing, and RAG parameters
+- Tab-based multi-panel — view notes and run Q&A simultaneously
 - KaTeX math rendering, code highlighting, dark theme
 
 ### Other CLI Commands
@@ -183,39 +189,54 @@ python pv.py fix-metadata <paper_id>  # Re-extract metadata
 python pv.py fix-metadata --all       # Fix metadata for all papers
 python pv.py import --no-llm          # Extract text only, skip LLM
 python pv.py import --force           # Force re-import (ignore content hash)
+
+# Multi-turn conversation sessions
+python pv.py session new              # Create a new session
+python pv.py session list             # List all sessions
+python pv.py session show <id>        # Show session details
+python pv.py session delete <id>      # Delete a session
+python pv.py ask "your question" --session <id>   # Ask within a session
+python pv.py ask "follow-up" --continue           # Continue the most recent session
 ```
 
 ---
 
 ## Architecture
 
-```
-papers/*.pdf
-  │
-  ├─► parser/extractor.py  (PyMuPDF text extraction)
-  │   └─► extracted/*.md   (cached raw text)
-  │
-  ├─► notes/generator.py   (LLM metadata extraction + note generation)
-  │   └─► notes/*.md       (structured reading notes)
-  │
-  ├─► indexer/chunker.py   (section-aware chunking, ~800 chars/chunk)
-  ├─► indexer/embedder.py  (multilingual-e5-base, local, zero API cost)
-  └─► indexer/store.py     (LanceDB dual index)
-       ├─► notes_index     (paper-level vectors with section structure)
-       └─► chunks_index    (paragraph-level vectors with section labels)
-```
+```mermaid
+flowchart LR
+    subgraph Sources["📦 Input"]
+        direction TB
+        notes["📝 notes/*.md<br/>Structured reading notes"]
+        pdf["📄 papers/*.pdf<br/>Original PDF files"]
+    end
 
-**RAG pipeline:**
+    subgraph Index["🗂 LanceDB Dual Index"]
+        notes_idx["notes_index<br/>Paper-level vectors<br/>+ section structure"]
+        chunks_idx["chunks<br/>Paragraph-level vectors<br/>+ section labels"]
+    end
 
-```
-User question
-  → Embed question (once, reused)
-  → Search notes_index (2× recall)
-  → LLM relevance filter → top-n papers
-  → 3-level judge (or user -d override)
-  → Section-targeted chunk retrieval
-  → Sort by paper/position → build context
-  → LLM streaming answer (with source citations)
+    subgraph RAG["🔍 RAG Retrieval"]
+        direction TB
+        q["❓ User question"]
+        embed["Embed query<br/>(once, reused)"]
+        s1["① Search notes_index<br/>(2× recall → LLM filter → top-n)"]
+        judge["Detail judge<br/>(auto / 1 / 2 / 3 / all)"]
+        s2["② Search chunks<br/>(section-targeted, on-demand)"]
+        context["Sort → dedup → build context"]
+        ans["💬 LLM streaming answer<br/>(with source citations)"]
+    end
+
+    notes -->|"embed"| notes_idx
+    pdf -->|"PyMuPDF → chunk → embed"| chunks_idx
+
+    q --> embed --> s1
+    notes_idx --- s1
+    s1 --> judge
+    judge -->|"level = 1<br/>notes sufficient"| context
+    judge -->|"level ≥ 2<br/>need details"| s2
+    chunks_idx --- s2
+    s2 --> context --> ans
 ```
 
 **Key design decisions:**
@@ -295,6 +316,7 @@ Settings saved via the Web UI are stored in `vault/settings.json`. Priority: **e
 ./vault/
 ├── extracted/       # Cached raw text extracted from PDFs (.md)
 ├── notes/           # LLM-generated structured reading notes (.md)
+├── sessions/        # Multi-turn conversation session files (.json)
 ├── models/          # HuggingFace embedding model cache (~500MB)
 ├── vectors/         # LanceDB vector database
 └── settings.json    # Web UI persisted settings
@@ -344,7 +366,7 @@ All data is plain text. Notes can be opened and edited in Obsidian, VS Code, or 
 - [x] Web UI cancel/interrupt support
 - [x] Double-click launch scripts (macOS / Windows / Linux)
 - [ ] Paper relationship graph
-- [ ] Multi-turn conversation sessions
+- [x] Multi-turn conversation sessions
 - [ ] Token budget control
 
 ---
