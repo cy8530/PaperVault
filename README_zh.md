@@ -202,33 +202,40 @@ python pv.py ask "追问" --continue           # 继续最近的会话
 
 ## 架构
 
-```
-papers/*.pdf
-  │
-  ├─► parser/extractor.py  (PyMuPDF 文本提取)
-  │   └─► extracted/*.md   (缓存原始文本)
-  │
-  ├─► notes/generator.py   (LLM 元数据提取 + 笔记生成)
-  │   └─► notes/*.md       (结构化中文阅读笔记)
-  │
-  ├─► indexer/chunker.py   (章节感知分块, ~800 字/块)
-  ├─► indexer/embedder.py  (multilingual-e5-base, 本地运行, 零 API 费用)
-  └─► indexer/store.py     (LanceDB 双索引)
-       ├─► notes_index     (论文级向量, 含章节结构)
-       └─► chunks_index    (段落级向量, 含章节标签)
-```
+```mermaid
+flowchart LR
+    subgraph Sources["📦 输入"]
+        direction TB
+        notes["📝 notes/*.md<br/>结构化阅读笔记"]
+        pdf["📄 papers/*.pdf<br/>原始 PDF 文件"]
+    end
 
-**RAG 管道：**
+    subgraph Index["🗂 LanceDB 双索引"]
+        notes_idx["notes_index<br/>论文级向量<br/>+ 章节结构"]
+        chunks_idx["chunks<br/>段落级向量<br/>+ 章节标签"]
+    end
 
-```
-用户提问
-  → 嵌入问题 (一次, 复用)
-  → 检索 notes_index (2× 召回)
-  → LLM 相关性筛选 → top-n 论文
-  → 3 级 judge (或用户 -d 覆盖)
-  → 章节定向 chunk 检索
-  → 按论文/位置排序 → 构建 context
-  → LLM 流式生成答案 (附来源引用)
+    subgraph RAG["🔍 RAG 检索"]
+        direction TB
+        q["❓ 用户提问"]
+        embed["嵌入问题<br/>(一次，复用)"]
+        s1["① 检索 notes_index<br/>(2× 召回 → LLM 筛选 → top-n)"]
+        judge["深度判定<br/>(auto / 1 / 2 / 3 / all)"]
+        s2["② 检索 chunks<br/>(章节定向，按需加载)"]
+        context["排序 → 去重 → 构建上下文"]
+        ans["💬 LLM 流式答案<br/>(附来源引用)"]
+    end
+
+    notes -->|"embed"| notes_idx
+    pdf -->|"PyMuPDF → 分块 → embed"| chunks_idx
+
+    q --> embed --> s1
+    notes_idx --- s1
+    s1 --> judge
+    judge -->|"level = 1<br/>笔记足够"| context
+    judge -->|"level ≥ 2<br/>需要细节"| s2
+    chunks_idx --- s2
+    s2 --> context --> ans
 ```
 
 **关键设计：**
