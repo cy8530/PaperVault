@@ -6,6 +6,10 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![English](https://img.shields.io/badge/README-English-blue)](README.md)
 
+![Web UI](webui.png)
+
+![RAG Q&A](webui_rag.png)
+
 ---
 
 ## 为什么需要 Paper Vault？
