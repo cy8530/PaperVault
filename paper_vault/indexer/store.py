@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import lancedb
+import numpy as np
 import pyarrow as pa
 from ..config import config
 from .embedder import embedding_dim
@@ -17,8 +20,8 @@ def _quote_id(paper_id: str) -> str:
     return f"'{_escape_sql(paper_id)}'"
 
 
-def build_where_clause(year_from: int = None, year_to: int = None,
-                       author: str = None) -> str | None:
+def build_where_clause(year_from: int | None = None, year_to: int | None = None,
+                       author: str | None = None) -> str | None:
     """Build a SQL WHERE clause from filter parameters. Returns None if no filters."""
     conditions = []
     if year_from is not None:
@@ -62,21 +65,34 @@ def _notes_schema():
         pa.field("chunk_count", pa.int32()),
         pa.field("note_file", pa.string()),
         pa.field("content_hash", pa.string()),
+        pa.field("created_at", pa.float64()),
         pa.field("vector", pa.list_(pa.float32(), list_size=dim)),
     ])
 
 
 # ── Chunks index ──────────────────────────────────────
 
-def _ensure_table(db, name: str, schema):
-    """Get or create a table. Never overwrites existing data."""
+def _ensure_table(db: lancedb.DBConnection, name: str, schema: pa.Schema) -> lancedb.table.Table:
+    """Get or create a table. Never overwrites existing data.
+
+    Migrates existing tables that are missing columns from the target schema.
+    """
     try:
-        return db.open_table(name)
+        table = db.open_table(name)
     except Exception:
         return db.create_table(name, schema=schema, mode="create")
 
+    # Add any columns that exist in the target schema but not in the table.
+    # Use SQL expression '0.0' for numeric defaults so existing rows get a
+    # sortable value instead of null (which breaks sorting on the new column).
+    existing_names = {f.name for f in table.schema}
+    for f in schema:
+        if f.name not in existing_names:
+            table.add_columns({f.name: "0.0"})
+    return table
 
-def rebuild_chunks_index(paper_id: str, chunks: list[dict], embeddings, meta: dict = None):
+
+def rebuild_chunks_index(paper_id: str, chunks: list[dict[str, str | int]], embeddings: np.ndarray, meta: dict[str, str | list[str] | int | None] | None = None) -> None:
     if meta is None:
         meta = {}
 
@@ -107,8 +123,8 @@ def rebuild_chunks_index(paper_id: str, chunks: list[dict], embeddings, meta: di
     table.add(rows)
 
 
-def search_chunks(query_vector, top_k: int = 5, where: str = None,
-                  distance_threshold: float = None) -> list[dict]:
+def search_chunks(query_vector: np.ndarray, top_k: int = 5, where: str | None = None,
+                  distance_threshold: float | None = None) -> list[dict[str, str | int | float]]:
     db = _get_db()
     try:
         table = db.open_table(_CHUNKS_TABLE)
@@ -123,11 +139,11 @@ def search_chunks(query_vector, top_k: int = 5, where: str = None,
         return []
 
 
-def search_chunks_for_papers(query_vector, paper_ids: list[str],
+def search_chunks_for_papers(query_vector: np.ndarray, paper_ids: list[str],
                               per_paper: int = 3,
-                              sections: list[str] = None,
-                              where: str = None,
-                              distance_threshold: float = None) -> list[dict]:
+                              sections: list[str] | None = None,
+                              where: str | None = None,
+                              distance_threshold: float | None = None) -> list[dict[str, str | int | float]]:
     """Search chunks limited to specific paper_ids. Optionally filter by sections, where clause, and/or distance threshold."""
     if not paper_ids:
         return []
@@ -153,10 +169,25 @@ def search_chunks_for_papers(query_vector, paper_ids: list[str],
 
 # ── Notes index (paper-level) ─────────────────────────
 
-def rebuild_notes_index(paper_id: str, note: str, note_embedding, meta: dict,
+def rebuild_notes_index(paper_id: str, note: str, note_embedding: np.ndarray, meta: dict[str, str | list[str] | int | None],
                         chunk_count: int = 0, sections: str = "",
-                        note_file: str = "", content_hash: str = ""):
+                        note_file: str = "", content_hash: str = "") -> None:
+    import time
+
     db = _get_db()
+
+    # Preserve original created_at if paper was already indexed
+    created_at = time.time()
+    try:
+        table = db.open_table(_NOTES_TABLE)
+        old_rows = table.to_arrow().filter(
+            pa.compute.equal(table.to_arrow()["paper_id"].combine_chunks(), paper_id)
+        ).to_pylist()
+        if old_rows:
+            created_at = old_rows[0].get("created_at", created_at)
+    except Exception:
+        pass
+
     row = {
         "paper_id": paper_id,
         "title": meta.get("title", ""),
@@ -168,6 +199,7 @@ def rebuild_notes_index(paper_id: str, note: str, note_embedding, meta: dict,
         "chunk_count": chunk_count,
         "note_file": note_file,
         "content_hash": content_hash,
+        "created_at": created_at,
         "vector": note_embedding.tolist(),
     }
 
@@ -176,8 +208,8 @@ def rebuild_notes_index(paper_id: str, note: str, note_embedding, meta: dict,
     table.add([row])
 
 
-def search_notes(query_vector, top_k: int = 3, where: str = None,
-                 distance_threshold: float = None) -> list[dict]:
+def search_notes(query_vector: np.ndarray, top_k: int = 3, where: str | None = None,
+                 distance_threshold: float | None = None) -> list[dict[str, str | int | float]]:
     db = _get_db()
     try:
         table = db.open_table(_NOTES_TABLE)
@@ -222,7 +254,7 @@ def get_indexed_hashes() -> set[str]:
         return set()
 
 
-def get_paper_meta(paper_id: str) -> dict | None:
+def get_paper_meta(paper_id: str) -> dict[str, str | int | float] | None:
     """Return the full row for a paper from notes_index, or None."""
     db = _get_db()
     try:
@@ -236,7 +268,7 @@ def get_paper_meta(paper_id: str) -> dict | None:
         return None
 
 
-def update_note_content(paper_id: str, note_text: str, note_embedding):
+def update_note_content(paper_id: str, note_text: str, note_embedding: np.ndarray) -> None:
     """Update the note text and its embedding vector in notes_index.
 
     Uses delete + add (same pattern as rebuild_notes_index) because LanceDB
@@ -255,7 +287,7 @@ def update_note_content(paper_id: str, note_text: str, note_embedding):
     table.add([row])
 
 
-def update_paper_metadata(paper_id: str, meta: dict, note_file: str = ""):
+def update_paper_metadata(paper_id: str, meta: dict[str, str | list[str] | int | None], note_file: str = "") -> None:
     """Update metadata (title, authors, year, keywords, note_file) in both tables."""
     title = meta.get("title", "")
     authors = ", ".join(meta.get("authors", []))
@@ -275,7 +307,7 @@ def update_paper_metadata(paper_id: str, meta: dict, note_file: str = ""):
             pass
 
 
-def get_paper_info(paper_id: str) -> dict | None:
+def get_paper_info(paper_id: str) -> dict[str, str | int | float] | None:
     """Get metadata for a paper from the notes index."""
     db = _get_db()
     try:
@@ -289,7 +321,7 @@ def get_paper_info(paper_id: str) -> dict | None:
     return None
 
 
-def remove_paper(paper_id: str):
+def remove_paper(paper_id: str) -> None:
     """Remove a paper from both chunks and notes indexes."""
     db = _get_db()
     for tbl_name in (_CHUNKS_TABLE, _NOTES_TABLE):
@@ -319,7 +351,7 @@ def get_duplicate_paper_ids() -> dict[str, list[int]]:
     return {pid: idxs for pid, idxs in seen.items() if len(idxs) > 1}
 
 
-def remove_duplicate_rows(keep_count: int = 1) -> int:
+def remove_duplicate_rows(keep_count: int = 1) -> int | None:
     """Keep only the first *keep_count* rows per paper_id, drop the rest.
 
     LanceDB does not support row-level delete by index, so we rebuild the

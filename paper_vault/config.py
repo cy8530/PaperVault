@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,7 +15,7 @@ os.environ.setdefault("HF_HOME", str(_vault_dir / "models" / "huggingface"))
 _SETTINGS_PATH = _vault_dir / "settings.json"
 
 
-def _load_settings() -> dict:
+def _load_settings() -> dict[str, Any]:
     """Load web-persisted settings from vault/settings.json."""
     try:
         if _SETTINGS_PATH.exists():
@@ -22,7 +25,7 @@ def _load_settings() -> dict:
     return {}
 
 
-def save_settings(data: dict) -> None:
+def save_settings(data: dict[str, Any]) -> None:
     """Persist settings to vault/settings.json."""
     _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     _SETTINGS_PATH.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -52,72 +55,72 @@ def _get_float(key: str, env: str, default: str) -> float:
 
 
 class Config:
-    _settings = _load_settings()
+    _settings: dict[str, Any] = _load_settings()
 
     # ── Filesystem ──────────────────────────────────────
-    VAULT_DIR = Path(_get("vault_dir", "PAPER_VAULT_DIR", "vault"))
-    IMPORT_DIRS_RAW = _get("import_dirs", "PAPER_VAULT_IMPORT_DIRS", "./papers")
-    DEFAULT_IMPORT_DIRS = (
+    VAULT_DIR: Path = Path(_get("vault_dir", "PAPER_VAULT_DIR", "vault"))
+    IMPORT_DIRS_RAW: str = _get("import_dirs", "PAPER_VAULT_IMPORT_DIRS", "./papers")
+    DEFAULT_IMPORT_DIRS: list[Path] = (
         [Path(p) for p in IMPORT_DIRS_RAW.split(":")]
         if isinstance(IMPORT_DIRS_RAW, str) else
         [Path(p) for p in IMPORT_DIRS_RAW]
     )
-    EXTRACTED_DIR = Path(_get("extracted_dir", "", str(VAULT_DIR / "extracted")))
-    NOTES_DIR = Path(_get("notes_dir", "", str(VAULT_DIR / "notes")))
-    VECTORS_DIR = Path(_get("vectors_dir", "", str(VAULT_DIR / "vectors")))
-    MODELS_DIR = Path(_get("models_dir", "", str(VAULT_DIR / "models")))
+    EXTRACTED_DIR: Path = Path(_get("extracted_dir", "", str(VAULT_DIR / "extracted")))
+    NOTES_DIR: Path = Path(_get("notes_dir", "", str(VAULT_DIR / "notes")))
+    VECTORS_DIR: Path = Path(_get("vectors_dir", "", str(VAULT_DIR / "vectors")))
+    MODELS_DIR: Path = Path(_get("models_dir", "", str(VAULT_DIR / "models")))
 
     # ── LLM ────────────────────────────────────────────
-    LLM_BASE_URL = _get("llm_base_url", "OPENAI_BASE_URL", "")
-    LLM_API_KEY = _get("llm_api_key", "OPENAI_API_KEY", "")
-    LLM_MODEL = _get("llm_model", "MODEL_ID", "")
-    LIGHT_MODEL_ID = _get("light_model_id", "LIGHT_MODEL_ID", LLM_MODEL)
-    EMBEDDING_MODEL = _get("embedding_model", "EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
+    LLM_BASE_URL: str = _get("llm_base_url", "OPENAI_BASE_URL", "")
+    LLM_API_KEY: str = _get("llm_api_key", "OPENAI_API_KEY", "")
+    LLM_MODEL: str = _get("llm_model", "MODEL_ID", "")
+    LIGHT_MODEL_ID: str = _get("light_model_id", "LIGHT_MODEL_ID", LLM_MODEL)
+    EMBEDDING_MODEL: str = _get("embedding_model", "EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
 
     # ── Import ──────────────────────────────────────────
-    MAX_PDF_SIZE_MB = _get_int("max_pdf_mb", "PAPER_VAULT_MAX_PDF_MB", "0") or None
-    MAX_UPLOAD_MB = _get_int("max_upload_mb", "PAPER_VAULT_MAX_UPLOAD_MB", "100")
+    MAX_PDF_SIZE_MB: int | None = _get_int("max_pdf_mb", "PAPER_VAULT_MAX_PDF_MB", "0") or None
+    MAX_UPLOAD_MB: int = _get_int("max_upload_mb", "PAPER_VAULT_MAX_UPLOAD_MB", "100")
 
     # ── Chunking ────────────────────────────────────────
-    CHUNK_SIZE = _get_int("chunk_size", "PAPER_VAULT_CHUNK_SIZE", "800")
-    CHUNK_OVERLAP = _get_int("chunk_overlap", "PAPER_VAULT_CHUNK_OVERLAP", "100")
+    CHUNK_SIZE: int = _get_int("chunk_size", "PAPER_VAULT_CHUNK_SIZE", "800")
+    CHUNK_OVERLAP: int = _get_int("chunk_overlap", "PAPER_VAULT_CHUNK_OVERLAP", "100")
 
     # ── Metadata extraction ─────────────────────────────
-    METADATA_SNIPPET_CHARS = _get_int("metadata_snippet_chars", "PAPER_VAULT_METADATA_SNIPPET_CHARS", "6000")
-    META_EXTRACT_MAX_TOKENS = _get_int("meta_extract_max_tokens", "PAPER_VAULT_META_EXTRACT_MAX_TOKENS", "512")
+    METADATA_SNIPPET_CHARS: int = _get_int("metadata_snippet_chars", "PAPER_VAULT_METADATA_SNIPPET_CHARS", "6000")
+    META_EXTRACT_MAX_TOKENS: int = _get_int("meta_extract_max_tokens", "PAPER_VAULT_META_EXTRACT_MAX_TOKENS", "512")
 
     # ── Note generation ─────────────────────────────────
-    NOTE_GEN_MAX_TOKENS = _get_int("note_gen_max_tokens", "PAPER_VAULT_NOTE_GEN_MAX_TOKENS", "4096")
-    NOTE_GEN_TEMPERATURE = _get_float("note_gen_temperature", "PAPER_VAULT_NOTE_GEN_TEMPERATURE", "0.3")
-    NOTE_FILENAME_MAX_LEN = _get_int("note_filename_max_len", "PAPER_VAULT_NOTE_FILENAME_MAX_LEN", "150")
+    NOTE_GEN_MAX_TOKENS: int = _get_int("note_gen_max_tokens", "PAPER_VAULT_NOTE_GEN_MAX_TOKENS", "4096")
+    NOTE_GEN_TEMPERATURE: float = _get_float("note_gen_temperature", "PAPER_VAULT_NOTE_GEN_TEMPERATURE", "0.3")
+    NOTE_FILENAME_MAX_LEN: int = _get_int("note_filename_max_len", "PAPER_VAULT_NOTE_FILENAME_MAX_LEN", "150")
 
     # ── Dedup ───────────────────────────────────────────
-    DEDUP_HASH_CHARS = _get_int("dedup_hash_chars", "PAPER_VAULT_DEDUP_HASH_CHARS", "5000")
+    DEDUP_HASH_CHARS: int = _get_int("dedup_hash_chars", "PAPER_VAULT_DEDUP_HASH_CHARS", "5000")
 
     # ── RAG pipeline ────────────────────────────────────
-    RAG_FILTER_MAX_TOKENS = _get_int("rag_filter_max_tokens", "PAPER_VAULT_RAG_FILTER_MAX_TOKENS", "256")
-    RAG_JUDGE_MAX_TOKENS = _get_int("rag_judge_max_tokens", "PAPER_VAULT_RAG_JUDGE_MAX_TOKENS", "10")
-    RAG_QA_TEMPERATURE = _get_float("rag_qa_temperature", "PAPER_VAULT_RAG_QA_TEMPERATURE", "0.3")
-    RAG_SEARCH_BREADTH_MIN = _get_int("rag_search_breadth_min", "PAPER_VAULT_RAG_SEARCH_BREADTH_MIN", "10")
-    RAG_DETAIL_MODERATE_DIVISOR = _get_int("rag_detail_moderate_divisor", "PAPER_VAULT_RAG_DETAIL_MODERATE_DIVISOR", "8")
-    RAG_DETAIL_EXTENSIVE_DIVISOR = _get_int("rag_detail_extensive_divisor", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_DIVISOR", "3")
-    RAG_DETAIL_MODERATE_MIN = _get_int("rag_detail_moderate_min", "PAPER_VAULT_RAG_DETAIL_MODERATE_MIN", "5")
-    RAG_DETAIL_EXTENSIVE_MIN = _get_int("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15")
-    RAG_DEFAULT_CHUNK_COUNT = _get_int("rag_default_chunk_count", "PAPER_VAULT_RAG_DEFAULT_CHUNK_COUNT", "50")
-    RAG_SEARCH_DISTANCE_THRESHOLD = _get_float("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "2.0")
-    RAG_LEVEL1_MIN_CHUNKS = _get_int("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "3")
-    RAG_QUERY_VARIANTS = _get_int("rag_query_variants", "PAPER_VAULT_RAG_QUERY_VARIANTS", "3")
+    RAG_FILTER_MAX_TOKENS: int = _get_int("rag_filter_max_tokens", "PAPER_VAULT_RAG_FILTER_MAX_TOKENS", "256")
+    RAG_JUDGE_MAX_TOKENS: int = _get_int("rag_judge_max_tokens", "PAPER_VAULT_RAG_JUDGE_MAX_TOKENS", "10")
+    RAG_QA_TEMPERATURE: float = _get_float("rag_qa_temperature", "PAPER_VAULT_RAG_QA_TEMPERATURE", "0.3")
+    RAG_SEARCH_BREADTH_MIN: int = _get_int("rag_search_breadth_min", "PAPER_VAULT_RAG_SEARCH_BREADTH_MIN", "10")
+    RAG_DETAIL_MODERATE_DIVISOR: int = _get_int("rag_detail_moderate_divisor", "PAPER_VAULT_RAG_DETAIL_MODERATE_DIVISOR", "8")
+    RAG_DETAIL_EXTENSIVE_DIVISOR: int = _get_int("rag_detail_extensive_divisor", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_DIVISOR", "3")
+    RAG_DETAIL_MODERATE_MIN: int = _get_int("rag_detail_moderate_min", "PAPER_VAULT_RAG_DETAIL_MODERATE_MIN", "5")
+    RAG_DETAIL_EXTENSIVE_MIN: int = _get_int("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15")
+    RAG_DEFAULT_CHUNK_COUNT: int = _get_int("rag_default_chunk_count", "PAPER_VAULT_RAG_DEFAULT_CHUNK_COUNT", "50")
+    RAG_SEARCH_DISTANCE_THRESHOLD: float = _get_float("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "1.5")
+    RAG_LEVEL1_MIN_CHUNKS: int = _get_int("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "5")
+    RAG_QUERY_VARIANTS: int = _get_int("rag_query_variants", "PAPER_VAULT_RAG_QUERY_VARIANTS", "3")
 
     # ── Session / Multi-turn ──────────────────────────
-    SESSION_KEEP_FULL_ROUNDS = _get_int("session_keep_full_rounds", "PAPER_VAULT_SESSION_KEEP_FULL", "3")
-    CONTEXT_HISTORY_MAX_TOKENS = _get_int("context_history_max_tokens", "PAPER_VAULT_HISTORY_MAX_TOKENS", "2000")
+    SESSION_KEEP_FULL_ROUNDS: int = _get_int("session_keep_full_rounds", "PAPER_VAULT_SESSION_KEEP_FULL", "3")
+    CONTEXT_HISTORY_MAX_TOKENS: int = _get_int("context_history_max_tokens", "PAPER_VAULT_HISTORY_MAX_TOKENS", "2000")
 
     # ── Answer token budget tiers ───────────────────────
-    ANSWER_TOKENS_TIER_1 = _get_int("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024")
-    ANSWER_TOKENS_TIER_2 = _get_int("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048")
-    ANSWER_TOKENS_TIER_3 = _get_int("answer_tokens_tier_3", "PAPER_VAULT_ANSWER_TOKENS_3", "3072")
+    ANSWER_TOKENS_TIER_1: int = _get_int("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024")
+    ANSWER_TOKENS_TIER_2: int = _get_int("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048")
+    ANSWER_TOKENS_TIER_3: int = _get_int("answer_tokens_tier_3", "PAPER_VAULT_ANSWER_TOKENS_3", "3072")
 
-    def __init__(self):
+    def __init__(self) -> None:
         for d in [self.VAULT_DIR, self.EXTRACTED_DIR, self.NOTES_DIR,
                    self.VECTORS_DIR, self.MODELS_DIR]:
             d.mkdir(parents=True, exist_ok=True)
@@ -133,7 +136,7 @@ class Config:
         return os.environ.get(env, default)
 
     @classmethod
-    def reload_settings(cls):
+    def reload_settings(cls) -> None:
         """Re-read settings.json (called after web settings save)."""
         cls._settings = _load_settings()
         s = cls._s  # shorthand
@@ -163,8 +166,8 @@ class Config:
         cls.RAG_DETAIL_EXTENSIVE_DIVISOR = int(s("rag_detail_extensive_divisor", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_DIVISOR", "3"))
         cls.RAG_DETAIL_MODERATE_MIN = int(s("rag_detail_moderate_min", "PAPER_VAULT_RAG_DETAIL_MODERATE_MIN", "5"))
         cls.RAG_DETAIL_EXTENSIVE_MIN = int(s("rag_detail_extensive_min", "PAPER_VAULT_RAG_DETAIL_EXTENSIVE_MIN", "15"))
-        cls.RAG_SEARCH_DISTANCE_THRESHOLD = float(s("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "2.0"))
-        cls.RAG_LEVEL1_MIN_CHUNKS = int(s("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "3"))
+        cls.RAG_SEARCH_DISTANCE_THRESHOLD = float(s("rag_search_distance_threshold", "PAPER_VAULT_RAG_SEARCH_DISTANCE_THRESHOLD", "1.5"))
+        cls.RAG_LEVEL1_MIN_CHUNKS = int(s("rag_level1_min_chunks", "PAPER_VAULT_RAG_LEVEL1_MIN_CHUNKS", "5"))
         cls.RAG_QUERY_VARIANTS = int(s("rag_query_variants", "PAPER_VAULT_RAG_QUERY_VARIANTS", "3"))
         cls.ANSWER_TOKENS_TIER_1 = int(s("answer_tokens_tier_1", "PAPER_VAULT_ANSWER_TOKENS_1", "1024"))
         cls.ANSWER_TOKENS_TIER_2 = int(s("answer_tokens_tier_2", "PAPER_VAULT_ANSWER_TOKENS_2", "2048"))

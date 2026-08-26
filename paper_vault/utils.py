@@ -1,7 +1,10 @@
 """Shared utilities used across paper_vault modules."""
 
+from __future__ import annotations
+
 import json
 import re
+from typing import Any
 
 import httpx
 from openai import OpenAI
@@ -58,7 +61,7 @@ def strip_code_fences(text: str) -> str:
     return text.strip()
 
 
-def parse_llm_json(raw: str):
+def parse_llm_json(raw: str) -> Any:
     """Parse JSON from an LLM response, stripping ``` fences if present.
 
     Returns the parsed object, or None if parsing fails.

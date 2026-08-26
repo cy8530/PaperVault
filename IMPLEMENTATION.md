@@ -370,8 +370,12 @@ query → embed_texts([query]) → search_chunks(vector, top_k, where) → [{pap
 - 分治策略：逐篇生成子回答 → 综合所有子回答生成最终答案，每步只需关注单一论文的 context
 
 **实现细节：**
-- `ask()` / `ask_stream()` 新增 `divide_conquer` 参数（默认 False）
-- 触发条件：`divide_conquer=True` 且 `len(notes_results) > 1`
+- `ask()` / `ask_stream()` 新增 `divide_conquer` 参数（默认 `"auto"`）
+- 触发条件：
+  - `"auto"`（默认）：`len(notes_results) >= 2` 且 `detail_level >= 2`（复用 LLM judge 的问题复杂度判断，零额外开销）
+  - `True`/`"1"`：强制启用（多论文时）
+  - `False`/`"0"`：强制关闭
+- CLI：`--divide-conquer` 强制启用，`--no-divide-conquer` 强制关闭，默认 auto
 - 流程：
   1. 按 paper_id 分组 chunks
   2. 每篇论文：`_format_context` → `DIVIDE_SUB_PROMPT` → 轻量 LLM 生成子回答

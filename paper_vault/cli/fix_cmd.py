@@ -1,5 +1,7 @@
 """Re-extract metadata for indexed papers without re-importing PDFs."""
 
+from __future__ import annotations
+
 from pathlib import Path
 
 from ..config import config
@@ -31,7 +33,7 @@ def _find_extracted(paper_id: str) -> Path | None:
     return None
 
 
-def fix_metadata(paper_ids: list[str] | None = None, all_papers: bool = False):
+def fix_metadata(paper_ids: list[str] | None = None, all_papers: bool = False) -> None:
     """Re-extract metadata for specified papers (or all if --all).
 
     Updates the LanceDB metadata in place and renames the note file

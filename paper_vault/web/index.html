@@ -268,7 +268,13 @@ a { color:var(--accent); text-decoration:none; }
   <div>
     <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
       <span>📁 Notes</span>
-      <span onclick="loadPapers()" title="Refresh paper list" style="cursor:pointer;font-size:13px;opacity:0.5">↻</span>
+      <span style="display:flex;align-items:center;gap:8px">
+        <select id="paper-sort" onchange="loadPapers()" style="background:var(--bg3);color:var(--fg2);border:1px solid var(--border);border-radius:3px;font-size:10px;padding:1px 3px">
+          <option value="year">Year</option>
+          <option value="added">Added</option>
+        </select>
+        <span onclick="loadPapers()" title="Refresh paper list" style="cursor:pointer;font-size:13px;opacity:0.5">↻</span>
+      </span>
     </div>
     <ul id="paper-list"><li style="color:var(--fg3)">Loading...</li></ul>
     <div style="font-size:10px; color:var(--fg3); margin-top:2px" id="paper-count"></div>
@@ -570,7 +576,8 @@ function renderKatex(el) {
 // ── Load paper list ──
 async function loadPapers() {
   try {
-    const res = await fetch('/api/papers');
+    const sort = document.getElementById('paper-sort')?.value || 'year';
+    const res = await fetch('/api/papers?sort=' + sort);
     papers = await res.json();
   } catch(e) {
     papers = [];
@@ -1505,7 +1512,7 @@ async function askInSession(sessionId, tabId) {
   const detail = detailEl ? detailEl.value : 'auto';
   const nPapers = (npEl && npEl.value) ? npEl.value : '5';
   const maxTokens = (mtEl && mtEl.value) ? mtEl.value : '';
-  const divideConquer = dcEl ? (dcEl.checked ? '1' : '0') : '0';
+  const divideConquer = dcEl ? (dcEl.checked ? '1' : 'auto') : 'auto';
   const form = new FormData();
   form.append('question', question);
   form.append('n_papers', nPapers);

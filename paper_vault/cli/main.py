@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from .import_cmd import import_pdfs
 from .search_cmd import search
@@ -7,7 +9,7 @@ from ..indexer.store import get_indexed_paper_ids, remove_paper
 from ..rag.session import list_sessions, create_session, delete_session, get_session
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(prog="paper-vault", description="Personal paper reading assistant")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -45,6 +47,10 @@ def main():
     ask_parser.add_argument("--session", type=str, help="Session ID for multi-turn conversation")
     ask_parser.add_argument("--continue", dest="continue_session", type=str,
                             help="Continue an existing session (alias for --session)")
+    ask_parser.add_argument("--divide-conquer", action="store_true",
+                            help="Force divide & conquer on (default: auto — enables D&C when detail_level >= 2 and multiple papers)")
+    ask_parser.add_argument("--no-divide-conquer", action="store_true",
+                            help="Force divide & conquer off")
 
     # session
     session_parser = subparsers.add_parser("session", help="Manage conversation sessions")
@@ -85,10 +91,12 @@ def main():
                year_from=args.year_from, year_to=args.year_to, author=args.author)
     elif args.command == "ask":
         session_id = args.session or getattr(args, "continue_session", None)
+        dc = False if args.no_divide_conquer else ("1" if args.divide_conquer else "auto")
         ask_question(args.question, n_papers=args.notes, chunks_per_paper=args.chunks,
                      detail=args.detail, max_tokens=args.max_tokens,
                      year_from=args.year_from, year_to=args.year_to, author=args.author,
-                     session_id=session_id)
+                     session_id=session_id,
+                     divide_conquer=dc)
     elif args.command == "serve":
         import uvicorn
         import webbrowser

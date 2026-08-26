@@ -30,31 +30,56 @@ app = FastAPI(title="Paper Vault", version="0.1.0")
 
 WEB_DIR = Path(__file__).parent
 
+# Eager-init the note map cache at import time so the first request during
+# an import doesn't need to open LanceDB while a write is in progress.
+try:
+    _build_note_map()
+except Exception:
+    pass
+
 
 # ── Title to note file mapping (cached) ──────────────
 
 _note_map_cache = None
 _note_stems_cache = None
+_pid_to_filename_cache = None
 
 
 def _build_note_map():
-    global _note_map_cache, _note_stems_cache
+    global _note_map_cache, _note_stems_cache, _pid_to_filename_cache
     if _note_map_cache is not None:
         return _note_map_cache, _note_stems_cache
     mapping = {}
     stems = []
+    pid_to_filename = {}
     for f in config.NOTES_DIR.glob("*.md"):
         mapping[f.stem] = f.name
         stems.append((f.stem, f.name))
+
+    # Build paper_id → filename from LanceDB for fast lookup (bypass LanceDB later)
+    import lancedb
+    try:
+        db = lancedb.connect(str(config.VECTORS_DIR))
+        table = db.open_table("notes_index")
+        for r in table.to_arrow().to_pylist():
+            pid = r.get("paper_id", "")
+            nf = r.get("note_file", "")
+            if pid and nf and (config.NOTES_DIR / nf).exists():
+                pid_to_filename[pid] = nf
+    except Exception:
+        pass
+
     _note_map_cache = mapping
     _note_stems_cache = stems
+    _pid_to_filename_cache = pid_to_filename
     return mapping, stems
 
 
 def _invalidate_note_map():
-    global _note_map_cache, _note_stems_cache
+    global _note_map_cache, _note_stems_cache, _pid_to_filename_cache
     _note_map_cache = None
     _note_stems_cache = None
+    _pid_to_filename_cache = None
 
 
 def _find_note_file(paper_id: str, title: str, note_map: dict, note_stems: list) -> str:
@@ -84,8 +109,10 @@ def _find_note_file(paper_id: str, title: str, note_map: dict, note_stems: list)
 # ── Settings ────────────────────────────────────────
 
 @app.get("/api/settings")
-async def get_settings():
-    """Return current config values."""
+def get_settings():
+    """Return current config values. Reloads from disk/env before reading
+    so manual edits to settings.json or .env take effect without restart."""
+    config.reload_settings()
     return {
         "paths": {
             "import_dirs": [str(p) for p in config.DEFAULT_IMPORT_DIRS],
@@ -306,8 +333,11 @@ async def index():
 # ── Paper library ───────────────────────────────────
 
 @app.get("/api/papers")
-async def list_papers():
-    """List all indexed papers with metadata (from LanceDB notes_index only)."""
+def list_papers(sort: str = "year"):
+    """List all indexed papers with metadata (from LanceDB notes_index only).
+
+    sort: "year" (default, newest first) or "added" (most recently imported first).
+    """
     import lancedb
     db = lancedb.connect(str(config.VECTORS_DIR))
     try:
@@ -326,6 +356,7 @@ async def list_papers():
         seen.add(pid)
         title = r.get("title", "") or ""
         note_file = r.get("note_file", "") or _find_note_file(pid, title, note_map, note_stems)
+        ca = r.get("created_at")
         papers.append({
             "paper_id": pid,
             "title": title,
@@ -334,34 +365,40 @@ async def list_papers():
             "keywords": r.get("keywords", ""),
             "chunk_count": r.get("chunk_count", 0),
             "note_file": note_file,
+            "created_at": ca if isinstance(ca, (int, float)) and ca > 0 else 0,
         })
+
+    if sort == "added":
+        return sorted(papers, key=lambda p: p["created_at"], reverse=True)
     return sorted(papers, key=lambda p: (p.get("year") or 0), reverse=True)
 
 
 @app.get("/api/notes/{paper_id}")
-async def get_note(paper_id: str, filename: str = ""):
-    """Return a paper's full note content."""
+def get_note(paper_id: str, filename: str = ""):
+    """Return a paper's full note content.
+
+    Synchronous (def, not async) so FastAPI runs this in the thread pool,
+    isolated from the event loop.  File reads proceed immediately even when
+    the import thread is holding the GIL during embedding / LLM calls.
+    """
     if filename:
         note_path = config.NOTES_DIR / filename
         if note_path.exists():
             return {"paper_id": paper_id, "filename": filename,
                     "content": note_path.read_text(encoding="utf-8")}
 
-    note_map, note_stems = _build_note_map()
-    title = ""
-    import lancedb
-    db = lancedb.connect(str(config.VECTORS_DIR))
-    try:
-        table = db.open_table("notes_index")
-        rows = table.to_arrow().to_pylist()
-        for r in rows:
-            if r["paper_id"] == paper_id:
-                title = r.get("title", "") or ""
-                break
-    except Exception:
-        pass
+    # Fast path: use cached paper_id → filename (bypasses LanceDB entirely)
+    _build_note_map()
+    if _pid_to_filename_cache and paper_id in _pid_to_filename_cache:
+        note_file = _pid_to_filename_cache[paper_id]
+        note_path = config.NOTES_DIR / note_file
+        if note_path.exists():
+            return {"paper_id": paper_id, "filename": note_file,
+                    "content": note_path.read_text(encoding="utf-8")}
 
-    note_file = _find_note_file(paper_id, title, note_map, note_stems)
+    # Slow fallback: filesystem scan only (no LanceDB)
+    note_map, note_stems = _build_note_map()
+    note_file = _find_note_file(paper_id, "", note_map, note_stems)
     if note_file:
         note_path = config.NOTES_DIR / note_file
         if note_path.exists():

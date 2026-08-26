@@ -1,10 +1,16 @@
 """Adaptive RAG Q&A pipeline with streaming and non-streaming modes."""
 
+from __future__ import annotations
+
 import json
 import math
 import queue
 import re
 import threading
+from collections.abc import Callable, Generator
+from typing import Any
+
+import numpy as np
 
 from ..config import config
 from ..indexer.embedder import embed_texts
@@ -18,7 +24,8 @@ from . import session as session_mod
 # ── Text normalization ─────────────────────────────────
 
 def _normalize_text(text: str) -> str:
-    """Collapse whitespace for comparison."""
+    """Collapse whitespace and remove punctuation for comparison."""
+    text = re.sub(r'[^\w\s]', ' ', text)
     return re.sub(r'\s+', ' ', text).strip().lower()
 
 
@@ -34,11 +41,11 @@ def _word_overlap(a: str, b: str) -> float:
 
 # ── Context deduplication ──────────────────────────────
 
-def _deduplicate_items(items: list[dict], text_key: str) -> list[dict]:
-    """Remove items whose text is substantially contained in another item.
+def _deduplicate_items(items: list[dict[str, Any]], text_key: str) -> list[dict[str, Any]]:
+    """Content-based dedup fallback for items without structural IDs.
 
     Uses substring containment and word-overlap ratio (>85%) to detect
-    near-duplicates.  Keeps the longer / richer item when a duplicate is found.
+    near-duplicates.  Keeps the longer / richer item.
     """
     if len(items) <= 1:
         return items
@@ -51,11 +58,9 @@ def _deduplicate_items(items: list[dict], text_key: str) -> list[dict]:
             if i == j:
                 continue
             ti, tj = texts[i], texts[j]
-            # Substring containment — shorter inside longer
             if len(ti) < len(tj) and ti in tj:
                 is_dup = True
                 break
-            # High word overlap
             if len(ti) > 40 and len(tj) > 40 and _word_overlap(ti, tj) > 0.85:
                 is_dup = True
                 break
@@ -64,9 +69,44 @@ def _deduplicate_items(items: list[dict], text_key: str) -> list[dict]:
     return keep
 
 
+def _deduplicate_notes(notes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate notes by paper_id — exact match, keeps first (best distance)."""
+    seen: set[str] = set()
+    keep = []
+    for n in notes:
+        pid = n.get("paper_id", "")
+        if pid not in seen:
+            seen.add(pid)
+            keep.append(n)
+    return keep
+
+
+def _deduplicate_chunks(chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Deduplicate chunks by (paper_id, chunk_idx) — exact ID-based, O(n).
+
+    Falls back to content-based dedup for items missing chunk_idx.
+    """
+    seen: set[tuple[str, int]] = set()
+    keep = []
+    fallback = []
+    for c in chunks:
+        pid = c.get("paper_id", "")
+        cid = c.get("chunk_idx")
+        if cid is not None:
+            key = (pid, cid)
+            if key not in seen:
+                seen.add(key)
+                keep.append(c)
+        else:
+            fallback.append(c)
+    if fallback:
+        keep.extend(_deduplicate_items(fallback, "text"))
+    return keep
+
+
 # ── Query expansion ────────────────────────────────────
 
-def _preprocess_question(question: str, session) -> tuple[str, str]:
+def _preprocess_question(question: str, session: Any) -> tuple[str, str]:
     """Rewrite + expand question in a single LLM call.
 
     Merges what were previously two serial calls:
@@ -79,13 +119,29 @@ def _preprocess_question(question: str, session) -> tuple[str, str]:
     if not session or not session.turns:
         return question, question
 
-    # Build compact context from last 6 turns
-    context = ""
+    # Gather compacted summaries from older conversation (cross-turn context)
+    compacted_parts = []
+    recent_parts = []
+    for t in session.turns:
+        if t.role == "user":
+            recent_parts = []  # reset — compacted content sits before recent turns
+        elif t.role == "assistant":
+            if not t.answer and t.summary:
+                # Compacted turn: summary replaces the full answer
+                compacted_parts.append(t.summary)
+            elif t.summary:
+                recent_parts.append(f"Q: (previous) A: {t.summary}")
+
+    # Build rich context: compacted history + last 6 recent turns
+    context_lines = []
+    if compacted_parts:
+        context_lines.append(f"[Earlier conversation]\n{' | '.join(compacted_parts[-5:])}")
     for t in session.turns[-6:]:
         if t.role == "user":
-            context += f"Q: {t.question}\n"
+            context_lines.append(f"Q: {t.question}")
         elif t.role == "assistant" and t.summary:
-            context += f"A: {t.summary}\n"
+            context_lines.append(f"A: {t.summary}")
+    context = "\n".join(context_lines)
 
     if not context.strip():
         return question, question
@@ -93,6 +149,7 @@ def _preprocess_question(question: str, session) -> tuple[str, str]:
     prompt = safe_format(prompts.QUESTION_PREPROCESS_PROMPT,
                          history=context, question=question)
     try:
+        tracker.add_input_text(prompt)
         response = get_llm_client().chat.completions.create(
             model=config.LIGHT_MODEL_ID,
             messages=[{"role": "user", "content": prompt}],
@@ -112,7 +169,7 @@ def _preprocess_question(question: str, session) -> tuple[str, str]:
 
     return question, question
 
-def _format_context(items: list[dict], prefix: str, text_key: str) -> str:
+def _format_context(items: list[dict[str, Any]], prefix: str, text_key: str) -> str:
     def _sort_key(item):
         return (item.get("paper_id", ""), item.get("chunk_idx", 0))
     sorted_items = sorted(items, key=_sort_key)
@@ -136,9 +193,10 @@ def _format_context(items: list[dict], prefix: str, text_key: str) -> str:
 
 # ── LLM helpers ───────────────────────────────────────
 
-def _call_light_llm(prompt: str, label: str, max_tokens: int = None) -> str:
+def _call_light_llm(prompt: str, label: str, max_tokens: int | None = None) -> str:
     if max_tokens is None:
         max_tokens = config.RAG_FILTER_MAX_TOKENS
+    tracker.add_input_text(prompt)
     response = get_llm_client().chat.completions.create(
         model=config.LIGHT_MODEL_ID,
         messages=[{"role": "user", "content": prompt}],
@@ -152,8 +210,8 @@ def _call_light_llm(prompt: str, label: str, max_tokens: int = None) -> str:
 # ── Pipeline steps ────────────────────────────────────
 
 def _search_and_filter(question: str, n_papers: int, where: str | None,
-                       query_vec=None, progress=None,
-                       broad_results: list[dict] = None) -> list[dict]:
+                       query_vec: np.ndarray | None = None, progress: Callable[[str], None] | None = None,
+                       broad_results: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """Stage 1: Broad semantic search + LLM relevance filter.
 
     If *broad_results* is given (from multi-vector search), skip the search
@@ -192,7 +250,7 @@ def _search_and_filter(question: str, n_papers: int, where: str | None,
     return filtered[:n_papers] if filtered else broad_results[:n_papers]
 
 
-def _determine_detail(question: str, notes_results: list[dict],
+def _determine_detail(question: str, notes_results: list[dict[str, Any]],
                       detail: str | None) -> tuple[int, bool]:
     """Stage 2: Returns (detail_level, full_text)."""
     if detail == "all":
@@ -212,7 +270,7 @@ def _determine_detail(question: str, notes_results: list[dict],
     return 2, False
 
 
-def _match_sections_batch(question: str, notes_results: list[dict]) -> dict[str, list[str]]:
+def _match_sections_batch(question: str, notes_results: list[dict[str, Any]]) -> dict[str, list[str]]:
     """Match question to relevant sections for all papers in one LLM call."""
     papers_with_sections = []
     for nr in notes_results:
@@ -267,7 +325,7 @@ def _answer_tokens(n_papers: int, max_tokens: int | None) -> int:
 
 
 def _multi_vector_search(search_text: str, where: str | None,
-                         progress_emit) -> list[dict]:
+                         progress_emit: Callable[[str], None]) -> list[dict[str, Any]]:
     """Generate query variants, embed all, search, merge by best _distance."""
     n_variants = config.RAG_QUERY_VARIANTS
     if n_variants <= 0:
@@ -316,8 +374,8 @@ def _multi_vector_search(search_text: str, where: str | None,
 def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
                     where: str | None, detail: str | None,
                     max_tokens: int | None,
-                    progress=None,
-                    search_query: str = None) -> tuple[list[str], str | None, int]:
+                    progress: Callable[[str], None] | None = None,
+                    search_query: str | None = None) -> tuple[list[str], str | None, int, list[dict[str, Any]], list[dict[str, Any]], int]:
     """Stages 1-3: search, filter, determine detail, retrieve context.
 
     Embeds the question once and reuses the vector across stages.
@@ -354,7 +412,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
         broad_results=multi_results if multi_results else None,
     )
     if not notes_results:
-        return status_msgs, None, 0, [], []
+        return status_msgs, None, 0, [], [], 0
 
     selected_count = len(notes_results)
     emit(f"Found {selected_count} relevant papers")
@@ -388,7 +446,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
     all_chunks = []
     if detail_level == 1 and not full_text:
         # Level 1: notes + minimal chunks for factual grounding
-        notes_dedup = _deduplicate_items(notes_results, "note")
+        notes_dedup = _deduplicate_notes(notes_results)
         context = _format_context(notes_dedup, "Paper", "note")
 
         min_chunks = config.RAG_LEVEL1_MIN_CHUNKS
@@ -406,7 +464,7 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
                 )
                 all_chunks.extend(chunks)
             if all_chunks:
-                all_chunks = _deduplicate_items(all_chunks, "text")
+                all_chunks = _deduplicate_chunks(all_chunks)
                 context += "\n\n---\n\n" + _format_context(all_chunks, "Detail", "text")
                 emit(f"Route: notes + {len(all_chunks)} minimal chunks")
             else:
@@ -454,9 +512,9 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
         if section_matches:
             route += ", section-targeted"
 
-        # Deduplicate chunks (adjacent chunks may overlap due to chunk_overlap)
+        # Deduplicate chunks by ID (adjacent chunks may overlap due to chunk_overlap)
         chunks_before = len(all_chunks)
-        all_chunks = _deduplicate_items(all_chunks, "text")
+        all_chunks = _deduplicate_chunks(all_chunks)
         if len(all_chunks) < chunks_before:
             route += f", dedup: {chunks_before} → {len(all_chunks)}"
 
@@ -465,13 +523,32 @@ def _gather_context(question: str, n_papers: int, chunks_per_paper: int | None,
                    + "\n\n---\n\n" + _format_context(all_chunks, "Detail", "text"))
 
     answer_tokens = _answer_tokens(n_papers, max_tokens)
-    return status_msgs, context, answer_tokens, notes_results, all_chunks
+    return status_msgs, context, answer_tokens, notes_results, all_chunks, detail_level
 
 
 # ── Divide and conquer ──────────────────────────────
 
-def _divide_conquer_answer(question: str, notes_results: list[dict],
-                           all_chunks: list[dict], history_text: str,
+def _should_divide_conquer(divide_conquer: bool | str | int, notes_results: list[dict[str, Any]],
+                           detail_level: int) -> bool:
+    """Decide whether to use divide & conquer.
+
+    Args:
+        divide_conquer: True/False/"auto". When "auto", uses pipeline signals
+                        (detail_level >= 2 and multiple papers) to decide.
+        notes_results: Papers found in stage 1.
+        detail_level: Resolved detail level (1/2/3) from the judge.
+    """
+    if divide_conquer in (True, 1, "1", "true", "True"):
+        return len(notes_results) > 1
+    if divide_conquer in (False, 0, "0", "false", "False"):
+        return False
+    # "auto": detail_level ≥ 2 means judge classified this as a technical/deep
+    # question — when multiple papers are involved, D&C helps avoid context confusion.
+    return len(notes_results) >= 2 and detail_level >= 2
+
+
+def _divide_conquer_answer(question: str, notes_results: list[dict[str, Any]],
+                           all_chunks: list[dict[str, Any]], history_text: str,
                            answer_tokens: int) -> str:
     """Answer each paper's context separately, then synthesize."""
     # Group chunks by paper_id
@@ -492,6 +569,7 @@ def _divide_conquer_answer(question: str, notes_results: list[dict],
 
         sub_max_tokens = min(answer_tokens // max(len(notes_results), 1), 1024)
         print(f"    [RAG] Divide: analyzing {title[:60]}...")
+        tracker.add_input_text(paper_context)
         response = get_llm_client().chat.completions.create(
             model=config.LIGHT_MODEL_ID,
             messages=[{"role": "user", "content": safe_format(
@@ -511,6 +589,7 @@ def _divide_conquer_answer(question: str, notes_results: list[dict],
     if history_text:
         prompt = history_text + "\n" + prompt
 
+    tracker.add_input_text(prompt)
     response = get_llm_client().chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "user", "content": prompt}],
@@ -524,17 +603,14 @@ def _divide_conquer_answer(question: str, notes_results: list[dict],
 
 # ── Public API ────────────────────────────────────────
 
-def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
-        where: str = None, detail: str = None, max_tokens: int = None,
-        session_id: str = None, divide_conquer: bool = False) -> str:
+def ask(question: str, n_papers: int = 5, chunks_per_paper: int | None = None,
+        where: str | None = None, detail: str | None = None, max_tokens: int | None = None,
+        session_id: str | None = None, divide_conquer: str | bool = "auto") -> str:
     """Adaptive RAG Q&A — returns complete answer string (CLI).
 
-    If *session_id* is provided, loads the session for multi-turn context:
-    rewrites the question to be self-contained, injects history into the
-    answer prompt, and records the exchange after completion.
-
-    If *divide_conquer* is True and multiple papers are found, answers each
-    paper separately then synthesizes a final answer.
+    If *session_id* is provided, loads the session for multi-turn context.
+    *divide_conquer*: True/False/"auto" (default). "auto" enables D&C when
+    detail_level >= 2 and multiple papers are found.
     """
     session = None
     rewritten_question = question
@@ -549,17 +625,25 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
             if search_query != rewritten_question:
                 print(f"    [RAG] Expanded: {search_query}")
 
-    status_msgs, context, answer_tokens, notes_results, all_chunks = _gather_context(
-        rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
-        search_query=search_query)
+    status_msgs, context, answer_tokens, notes_results, all_chunks, detail_level = \
+        _gather_context(rewritten_question, n_papers, chunks_per_paper, where, detail,
+                        max_tokens, search_query=search_query)
 
     for msg in status_msgs:
         print(f"    [RAG] {msg}")
 
     if context is None:
-        return ("No relevant papers found in your library for this question. "
-                "Suggestions: try broader search terms, reduce year/author filters, "
-                "or import more papers on this topic.")
+        tips = ["try broader or different search terms"]
+        if where:
+            tips.append("remove year/author filters to widen the search scope")
+        tips.append("import more papers on this topic into your library")
+        tip_text = "; ".join(tips)
+        return (
+            f"No relevant papers found in your library for this question.\n\n"
+            f"Suggestions: {tip_text}.\n\n"
+            f"Tip: use 'paper-vault search <keywords>' to explore what's available, "
+            f"or 'paper-vault list' to see all indexed papers."
+        )
 
     # Build history section
     history_text = ""
@@ -572,15 +656,20 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
                 lines = history_text.split("\n")
                 history_text = "\n".join(lines[-30:])
 
-    if divide_conquer and len(notes_results) > 1:
+    use_dc = _should_divide_conquer(divide_conquer, notes_results, detail_level)
+    if use_dc:
+        print(f"    [RAG] Divide & Conquer: {len(notes_results)} papers, "
+              f"detail_level={detail_level}")
         answer = _divide_conquer_answer(
             question, notes_results, all_chunks, history_text, answer_tokens)
     else:
         print("    [RAG] Generating answer...")
+        final_prompt = safe_format(prompts.QA_PROMPT,
+                                   history=history_text, context=context, question=question)
+        tracker.add_input_text(context + history_text)
         response = get_llm_client().chat.completions.create(
             model=config.LLM_MODEL,
-            messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,
-                history=history_text, context=context, question=question)}],
+            messages=[{"role": "user", "content": final_prompt}],
             temperature=config.RAG_QA_TEMPERATURE,
             max_tokens=answer_tokens,
             stream=False,
@@ -594,18 +683,16 @@ def ask(question: str, n_papers: int = 5, chunks_per_paper: int = None,
     return answer
 
 
-def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
-               where: str = None, detail: str = None, max_tokens: int = None,
-               session_id: str = None, divide_conquer: bool = False):
+def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int | None = None,
+               where: str | None = None, detail: str | None = None, max_tokens: int | None = None,
+               session_id: str | None = None, divide_conquer: str | bool = "auto") -> Generator[str, None, None]:
     """Streaming RAG Q&A — yields SSE-formatted progress events (Web).
 
     Runs _gather_context in a background thread so progress messages are
     yielded in real-time instead of buffered until completion.
 
-    If *session_id* is provided, loads session for multi-turn context.
-
-    If *divide_conquer* is True and multiple papers are found, answers each
-    paper separately then streams the final synthesis.
+    *divide_conquer*: True/False/"auto" (default). "auto" enables D&C when
+    detail_level >= 2 and multiple papers are found.
     """
     session = None
     rewritten_question = question
@@ -624,12 +711,12 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
 
     def _run_gather():
         try:
-            msgs, ctx, tokens, notes, chunks = _gather_context(
+            msgs, ctx, tokens, notes, chunks, d_level = _gather_context(
                 rewritten_question, n_papers, chunks_per_paper, where, detail, max_tokens,
                 progress=lambda msg: result_queue.put(("status", msg)),
                 search_query=search_query,
             )
-            result_queue.put(("__result__", (msgs, ctx, tokens, notes, chunks)))
+            result_queue.put(("__result__", (msgs, ctx, tokens, notes, chunks, d_level)))
         except Exception as e:
             result_queue.put(("__error__", str(e)))
 
@@ -640,6 +727,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
     answer_tokens = None
     notes_results = []
     all_chunks = []
+    detail_level = 1
 
     while True:
         try:
@@ -654,7 +742,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
             print(f"    [RAG] {msg}")
             yield emit_sse("status", message=msg)
         elif kind == "__result__":
-            _, (status_msgs, context, answer_tokens, notes_results, all_chunks) = item
+            _, (status_msgs, context, answer_tokens, notes_results, all_chunks, detail_level) = item
             break
         elif kind == "__error__":
             yield emit_sse("error", message=item[1])
@@ -663,10 +751,16 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
     thread.join()
 
     if context is None:
+        tips = ["try broader or different search terms"]
+        if where:
+            tips.append("remove year/author filters to widen the search scope")
+        tips.append("import more papers on this topic into your library")
+        tip_text = "; ".join(tips)
         yield emit_sse("done", answer=(
-            "No relevant papers found in your library for this question. "
-            "Suggestions: try broader search terms, reduce year/author filters, "
-            "or import more papers on this topic."))
+            f"No relevant papers found in your library for this question.\n\n"
+            f"Suggestions: {tip_text}.\n\n"
+            f"Tip: use 'paper-vault search <keywords>' to explore what's available, "
+            f"or 'paper-vault list' to see all indexed papers."))
         return
 
     # Build history section
@@ -680,7 +774,8 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
                 lines = history_text.split("\n")
                 history_text = "\n".join(lines[-30:])
 
-    if divide_conquer and len(notes_results) > 1:
+    use_dc = _should_divide_conquer(divide_conquer, notes_results, detail_level)
+    if use_dc:
         # Divide-and-conquer: per-paper sub-answers, then stream synthesis
         chunks_by_paper = {}
         for c in all_chunks:
@@ -701,6 +796,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
             print(f"    [RAG] {msg}")
             yield emit_sse("status", message=msg)
 
+            tracker.add_input_text(paper_context)
             response = get_llm_client().chat.completions.create(
                 model=config.LIGHT_MODEL_ID,
                 messages=[{"role": "user", "content": safe_format(
@@ -721,6 +817,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
         yield emit_sse("status", message=f"Synthesizing from {len(per_paper_answers)} papers...")
 
         answer = ""
+        tracker.add_input_text(prompt)
         response = get_llm_client().chat.completions.create(
             model=config.LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
@@ -744,6 +841,7 @@ def ask_stream(question: str, n_papers: int = 5, chunks_per_paper: int = None,
     yield emit_sse("status", message="Generating answer...")
 
     answer = ""
+    tracker.add_input_text(context + history_text)
     response = get_llm_client().chat.completions.create(
         model=config.LLM_MODEL,
         messages=[{"role": "user", "content": safe_format(prompts.QA_PROMPT,

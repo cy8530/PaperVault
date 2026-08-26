@@ -1,6 +1,6 @@
 """LLM-as-judge evaluation — faithfulness, coverage, context relevance.
 
-Uses the project's configured LLM (LIGHT_MODEL_ID) to judge RAG answer quality
+Uses the project's configured LLM (LLM_MODEL) to judge RAG answer quality
 by comparing the answer against retrieved contexts and a reference answer.
 
 Zero new dependencies — uses the same OpenAI client and config as the project.
@@ -89,10 +89,10 @@ Score:"""
 
 
 def _call_judge(prompt: str) -> str:
-    """Call the lightweight LLM for judging."""
+    """Call the main LLM for judging (stronger model = more reliable scores)."""
     try:
         response = get_llm_client().chat.completions.create(
-            model=config.LIGHT_MODEL_ID,
+            model=config.LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=512,

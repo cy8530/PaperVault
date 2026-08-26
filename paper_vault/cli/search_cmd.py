@@ -1,9 +1,11 @@
+from __future__ import annotations
+
 from ..retriever import search_papers
 from ..indexer.store import paper_count, build_where_clause
 
 
-def search(query: str, top_k: int = 5, year_from: int = None,
-           year_to: int = None, author: str = None):
+def search(query: str, top_k: int = 5, year_from: int | None = None,
+           year_to: int | None = None, author: str | None = None) -> None:
     """Semantic search across indexed papers, with optional filters."""
     total = paper_count()
     if total == 0:

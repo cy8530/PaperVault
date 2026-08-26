@@ -4,6 +4,8 @@ Prompts can be edited via the Web UI Settings page. Changes take effect
 immediately without server restart.
 """
 
+from __future__ import annotations
+
 import json
 from pathlib import Path
 

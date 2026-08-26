@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import re
 
 # Section header patterns (English + Chinese academic papers)
@@ -23,7 +25,7 @@ _SECTION_RE = re.compile(
 )
 
 
-def chunk_text(text: str, chunk_size: int = None, overlap: int = None) -> list[dict]:
+def chunk_text(text: str, chunk_size: int | None = None, overlap: int | None = None) -> list[dict[str, str | int]]:
     if chunk_size is None:
         from ..config import config
         chunk_size = config.CHUNK_SIZE

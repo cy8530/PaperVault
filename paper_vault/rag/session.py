@@ -1,9 +1,12 @@
 """Multi-turn conversation session management with progressive compaction."""
 
+from __future__ import annotations
+
 import json
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import Any
 
 from ..config import config
 from ..utils import get_llm_client, safe_format
@@ -22,7 +25,7 @@ class Turn:
     cited_papers: list[str] = field(default_factory=list)
     timestamp: float = 0.0
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         if not self.timestamp:
             self.timestamp = time.time()
 
@@ -36,7 +39,7 @@ class Session:
     turns: list[Turn] = field(default_factory=list)
     compact_count: int = 0        # how many times this session has been compacted
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         now = time.time()
         if not self.created_at:
             self.created_at = now
@@ -58,7 +61,7 @@ def _session_path(session_id: str) -> Path:
 
 # ── Serialization ──────────────────────────────────────
 
-def _session_to_dict(s: Session) -> dict:
+def _session_to_dict(s: Session) -> dict[str, Any]:
     return {
         "id": s.id,
         "name": s.name,
@@ -69,7 +72,7 @@ def _session_to_dict(s: Session) -> dict:
     }
 
 
-def _session_from_dict(d: dict) -> Session:
+def _session_from_dict(d: dict[str, Any]) -> Session:
     turns = [Turn(**t) for t in d.get("turns", [])]
     return Session(
         id=d["id"],
@@ -125,8 +128,8 @@ def rename_session(session_id: str, name: str) -> bool:
     return True
 
 
-def list_sessions() -> list[dict]:
-    sessions = []
+def list_sessions() -> list[dict[str, Any]]:
+    sessions: list[dict[str, Any]] = []
     for path in sorted(_sessions_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True):
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
